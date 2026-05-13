@@ -29,3 +29,9 @@ data/
 # Compose/profile runtime state (bind-mounted; avoid ownership/secret issues)
 hermes-config/
 runtime/
+
+
+Hermes-agent
+Hermes-agent/
+hermes-agent
+hermes-agent/
