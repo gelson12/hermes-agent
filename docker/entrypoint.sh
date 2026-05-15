@@ -137,27 +137,8 @@ esac
 
 # FORCE gateway mode if env var is set (Railway override)
 if [ "${HERMES_FORCE_GATEWAY:-false}" = "true" ]; then
-    echo "[entrypoint] HERMES_FORCE_GATEWAY=true — starting gateway in background"
-    # Start gateway in background (don't exec so we can activate it)
-    hermes gateway run &
-    GATEWAY_PID=$!
-
-    # Wait for the server to be ready (health endpoint responds)
-    echo "[entrypoint] Waiting for gateway to initialize..."
-    for attempt in {1..30}; do
-        if curl -s http://localhost:8642/health >/dev/null 2>&1; then
-            echo "[entrypoint] Gateway HTTP server ready at attempt $attempt"
-            break
-        fi
-        sleep 1
-    done
-
-    # Activate the gateway via CLI command (no auth needed)
-    echo "[entrypoint] Activating gateway via CLI..."
-    hermes gateway start 2>&1 || echo "Gateway activation command completed/failed"
-
-    # Wait for process to complete
-    wait $GATEWAY_PID
+    echo "[entrypoint] HERMES_FORCE_GATEWAY=true — forcing gateway mode"
+    exec hermes gateway run
 fi
 
 # Final exec: two supported invocation patterns.
