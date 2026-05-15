@@ -21,7 +21,7 @@ RUN apt-get update && \
 RUN useradd -u 10000 -m -d /opt/data hermes
 
 # Force rebuild: ARG invalidates cache on every build
-ARG BUILD_ID=2026-05-15-venv-permissions-fix
+ARG BUILD_ID=2026-05-15-venv-permissions-fix-rebuild-2
 RUN echo "BUILD_ID=${BUILD_ID}" && test ! -z "${BUILD_ID}"
 
 COPY --chmod=0755 --from=gosu_source /gosu /usr/local/bin/
