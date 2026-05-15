@@ -20,8 +20,9 @@ RUN apt-get update && \
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
 RUN useradd -u 10000 -m -d /opt/data hermes
 
-# Cache buster: force rebuild of all layers after this point
-RUN echo "Build timestamp: $(date)" && true
+# Force rebuild: ARG invalidates cache on every build
+ARG BUILD_ID=default
+RUN echo "BUILD_ID=${BUILD_ID}" && test ! -z "${BUILD_ID}"
 
 COPY --chmod=0755 --from=gosu_source /gosu /usr/local/bin/
 COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
@@ -113,3 +114,4 @@ ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_HOME=/opt/data
 ENV PATH="/opt/data/.local/bin:${PATH}"
 ENTRYPOINT [ "/usr/bin/tini", "-g", "--", "/opt/hermes/docker/entrypoint.sh", "gateway", "run" ]
+CMD []
