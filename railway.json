@@ -3,7 +3,5 @@
   "build": {
     "builder": "dockerfile"
   },
-  "deploy": {
-    "startCommand": "gateway run"
-  }
+  "deploy": {}
 }
