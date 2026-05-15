@@ -141,37 +141,18 @@ if [ "${HERMES_FORCE_GATEWAY:-false}" = "true" ]; then
     exec hermes gateway run
 fi
 
-# Final exec: two supported invocation patterns.
+# Final exec: Docker container entry point
 #
-#   docker run <image>                 -> exec `hermes gateway run` (server default)
-#   docker run <image> chat -q "..."   -> exec `hermes chat -q "..."` (legacy wrap)
-#   docker run <image> sleep infinity  -> exec `sleep infinity` directly
-#   docker run <image> bash            -> exec `bash` directly
+# When docker-compose or Railway runs this container:
+#   - Default (no args): exec hermes gateway run → foreground gateway
+#   - docker run ... bash → exec bash directly
+#   - docker run ... hermes chat → exec hermes chat
 #
-# If the first positional arg resolves to an executable on PATH, we assume the
-# caller wants to run it directly (needed by the launcher which runs long-lived
-# `sleep infinity` sandbox containers — see tools/environments/docker.py).
-# Otherwise we treat the args as a hermes subcommand and wrap with `hermes`,
-# preserving the documented `docker run <image> <subcommand>` behavior.
-#
-# No arguments means server mode (gateway run) for Railway deployments.
-# Special case: if arguments are exactly "gateway run", always run gateway.
+# Special case: if "gateway run" is explicitly passed, just run it directly
+# (no backgrounding, no `hermes gateway start` service management commands)
 if [ "$#" -eq 2 ] && [ "$1" = "gateway" ] && [ "$2" = "run" ]; then
-    echo "[entrypoint] Arguments are 'gateway run' — starting API server"
-    hermes gateway run &
-    GATEWAY_PID=$!
-
-    # Wait for API to be ready and activate gateway
-    for attempt in {1..30}; do
-        if curl -s http://localhost:8642/health >/dev/null 2>&1; then
-            echo "[entrypoint] Gateway ready, activating..."
-            hermes gateway start 2>&1 || true
-            break
-        fi
-        sleep 1
-    done
-
-    wait $GATEWAY_PID
+    echo "[entrypoint] Starting Hermes Gateway in foreground"
+    exec hermes gateway run
 fi
 
 echo "[entrypoint] Starting with $# arguments: $@"
@@ -180,23 +161,10 @@ if [ $# -gt 0 ] && command -v "$1" >/dev/null 2>&1; then
     exec "$@"
 fi
 
-# Default: if no args, run server mode
+# Default: if no args, run gateway
 if [ $# -eq 0 ]; then
     echo "[entrypoint] No arguments provided, defaulting to: hermes gateway run"
-    hermes gateway run &
-    GATEWAY_PID=$!
-
-    # Wait for API to be ready and activate gateway
-    for attempt in {1..30}; do
-        if curl -s http://localhost:8642/health >/dev/null 2>&1; then
-            echo "[entrypoint] Gateway ready, activating..."
-            hermes gateway start 2>&1 || true
-            break
-        fi
-        sleep 1
-    done
-
-    wait $GATEWAY_PID
+    exec hermes gateway run
 fi
 
 echo "[entrypoint] Running hermes subcommand: $@"
