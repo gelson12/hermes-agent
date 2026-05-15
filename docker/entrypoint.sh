@@ -152,9 +152,9 @@ if [ "${HERMES_FORCE_GATEWAY:-false}" = "true" ]; then
         sleep 1
     done
 
-    # Activate the gateway via API
-    echo "[entrypoint] Activating gateway via API..."
-    curl -s -X POST http://localhost:8642/api/gateway/start
+    # Activate the gateway via CLI command (no auth needed)
+    echo "[entrypoint] Activating gateway via CLI..."
+    hermes gateway start 2>&1 || echo "Gateway activation command completed/failed"
 
     # Wait for process to complete
     wait $GATEWAY_PID
@@ -184,7 +184,7 @@ if [ "$#" -eq 2 ] && [ "$1" = "gateway" ] && [ "$2" = "run" ]; then
     for attempt in {1..30}; do
         if curl -s http://localhost:8642/health >/dev/null 2>&1; then
             echo "[entrypoint] Gateway ready, activating..."
-            curl -s -X POST http://localhost:8642/api/gateway/start
+            hermes gateway start 2>&1 || true
             break
         fi
         sleep 1
@@ -209,7 +209,7 @@ if [ $# -eq 0 ]; then
     for attempt in {1..30}; do
         if curl -s http://localhost:8642/health >/dev/null 2>&1; then
             echo "[entrypoint] Gateway ready, activating..."
-            curl -s -X POST http://localhost:8642/api/gateway/start
+            hermes gateway start 2>&1 || true
             break
         fi
         sleep 1
