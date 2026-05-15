@@ -137,7 +137,7 @@ esac
 
 # Final exec: two supported invocation patterns.
 #
-#   docker run <image>                 -> exec `hermes gateway run` (non-interactive default)
+#   docker run <image>                 -> exec `hermes gateway run` (server default)
 #   docker run <image> chat -q "..."   -> exec `hermes chat -q "..."` (legacy wrap)
 #   docker run <image> sleep infinity  -> exec `sleep infinity` directly
 #   docker run <image> bash            -> exec `bash` directly
@@ -148,14 +148,13 @@ esac
 # Otherwise we treat the args as a hermes subcommand and wrap with `hermes`,
 # preserving the documented `docker run <image> <subcommand>` behavior.
 #
-# If no args and stdin is not a TTY, default to `gateway run` (API server mode)
-# instead of interactive shell — fixes Railway deployment where stdin is not a TTY.
+# No arguments means server mode (gateway run) for Railway deployments.
 if [ $# -gt 0 ] && command -v "$1" >/dev/null 2>&1; then
     exec "$@"
 fi
 
-if [ $# -eq 0 ] && [ ! -t 0 ]; then
-    # No args and stdin is not a terminal: run API server
+# Default: if no args, run server mode
+if [ $# -eq 0 ]; then
     exec hermes gateway run
 fi
 
