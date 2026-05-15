@@ -135,6 +135,12 @@ case "${HERMES_DASHBOARD:-}" in
         ;;
 esac
 
+# FORCE gateway mode if env var is set (Railway override)
+if [ "${HERMES_FORCE_GATEWAY:-false}" = "true" ]; then
+    echo "[entrypoint] HERMES_FORCE_GATEWAY=true — forcing gateway mode"
+    exec hermes gateway run
+fi
+
 # Final exec: two supported invocation patterns.
 #
 #   docker run <image>                 -> exec `hermes gateway run` (server default)
@@ -149,6 +155,12 @@ esac
 # preserving the documented `docker run <image> <subcommand>` behavior.
 #
 # No arguments means server mode (gateway run) for Railway deployments.
+# Special case: if arguments are exactly "gateway run", always run gateway.
+if [ "$#" -eq 2 ] && [ "$1" = "gateway" ] && [ "$2" = "run" ]; then
+    echo "[entrypoint] Arguments are 'gateway run' — starting API server"
+    exec hermes gateway run
+fi
+
 echo "[entrypoint] Starting with $# arguments: $@"
 if [ $# -gt 0 ] && command -v "$1" >/dev/null 2>&1; then
     echo "[entrypoint] Running direct command: $@"
