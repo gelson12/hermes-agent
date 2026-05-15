@@ -135,37 +135,6 @@ case "${HERMES_DASHBOARD:-}" in
         ;;
 esac
 
-# FORCE gateway mode if env var is set (Railway override)
-if [ "${HERMES_FORCE_GATEWAY:-false}" = "true" ]; then
-    echo "[entrypoint] HERMES_FORCE_GATEWAY=true — forcing gateway mode"
-    exec hermes gateway run
-fi
-
-# Final exec: Docker container entry point
-#
-# When docker-compose or Railway runs this container:
-#   - Default (no args): exec hermes gateway run → foreground gateway
-#   - docker run ... bash → exec bash directly
-#   - docker run ... hermes chat → exec hermes chat
-#
-# Special case: if "gateway run" is explicitly passed, just run it directly
-# (no backgrounding, no `hermes gateway start` service management commands)
-if [ "$#" -eq 2 ] && [ "$1" = "gateway" ] && [ "$2" = "run" ]; then
-    echo "[entrypoint] Starting Hermes Gateway in foreground"
-    exec hermes gateway run
-fi
-
-echo "[entrypoint] Starting with $# arguments: $@"
-if [ $# -gt 0 ] && command -v "$1" >/dev/null 2>&1; then
-    echo "[entrypoint] Running direct command: $@"
-    exec "$@"
-fi
-
-# Default: if no args, run gateway
-if [ $# -eq 0 ]; then
-    echo "[entrypoint] No arguments provided, defaulting to: hermes gateway run"
-    exec hermes gateway run
-fi
-
-echo "[entrypoint] Running hermes subcommand: $@"
-exec hermes "$@"
+# ===== SIMPLIFIED ENTRYPOINT: JUST RUN GATEWAY =====
+# No complex argument parsing. Just execute the gateway.
+exec hermes gateway run

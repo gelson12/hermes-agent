@@ -21,7 +21,7 @@ RUN apt-get update && \
 RUN useradd -u 10000 -m -d /opt/data hermes
 
 # Force rebuild: ARG invalidates cache on every build
-ARG BUILD_ID=2026-05-15-gateway-fix-final
+ARG BUILD_ID=2026-05-15-venv-permissions-fix
 RUN echo "BUILD_ID=${BUILD_ID}" && test ! -z "${BUILD_ID}"
 
 COPY --chmod=0755 --from=gosu_source /gosu /usr/local/bin/
@@ -100,7 +100,7 @@ RUN cd web && npm run build && \
 # not chowned here.
 USER root
 RUN chmod -R a+rX /opt/hermes && \
-    chown -R hermes:hermes /opt/hermes/ui-tui /opt/hermes/node_modules
+    chown -R hermes:hermes /opt/hermes/.venv /opt/hermes/ui-tui /opt/hermes/node_modules
 # Start as root so the entrypoint can usermod/groupmod + gosu.
 # If HERMES_UID is unset, the entrypoint drops to the default hermes user (10000).
 
