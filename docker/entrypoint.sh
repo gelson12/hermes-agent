@@ -137,8 +137,27 @@ esac
 
 # FORCE gateway mode if env var is set (Railway override)
 if [ "${HERMES_FORCE_GATEWAY:-false}" = "true" ]; then
-    echo "[entrypoint] HERMES_FORCE_GATEWAY=true — forcing gateway mode"
-    exec hermes gateway run
+    echo "[entrypoint] HERMES_FORCE_GATEWAY=true — starting gateway in background"
+    # Start gateway in background (don't exec so we can activate it)
+    hermes gateway run &
+    GATEWAY_PID=$!
+
+    # Wait for the server to be ready (health endpoint responds)
+    echo "[entrypoint] Waiting for gateway to initialize..."
+    for attempt in {1..30}; do
+        if curl -s http://localhost:8642/health >/dev/null 2>&1; then
+            echo "[entrypoint] Gateway HTTP server ready at attempt $attempt"
+            break
+        fi
+        sleep 1
+    done
+
+    # Activate the gateway via API
+    echo "[entrypoint] Activating gateway via API..."
+    curl -s -X POST http://localhost:8642/api/gateway/start
+
+    # Wait for process to complete
+    wait $GATEWAY_PID
 fi
 
 # Final exec: two supported invocation patterns.
@@ -158,7 +177,20 @@ fi
 # Special case: if arguments are exactly "gateway run", always run gateway.
 if [ "$#" -eq 2 ] && [ "$1" = "gateway" ] && [ "$2" = "run" ]; then
     echo "[entrypoint] Arguments are 'gateway run' — starting API server"
-    exec hermes gateway run
+    hermes gateway run &
+    GATEWAY_PID=$!
+
+    # Wait for API to be ready and activate gateway
+    for attempt in {1..30}; do
+        if curl -s http://localhost:8642/health >/dev/null 2>&1; then
+            echo "[entrypoint] Gateway ready, activating..."
+            curl -s -X POST http://localhost:8642/api/gateway/start
+            break
+        fi
+        sleep 1
+    done
+
+    wait $GATEWAY_PID
 fi
 
 echo "[entrypoint] Starting with $# arguments: $@"
@@ -170,7 +202,20 @@ fi
 # Default: if no args, run server mode
 if [ $# -eq 0 ]; then
     echo "[entrypoint] No arguments provided, defaulting to: hermes gateway run"
-    exec hermes gateway run
+    hermes gateway run &
+    GATEWAY_PID=$!
+
+    # Wait for API to be ready and activate gateway
+    for attempt in {1..30}; do
+        if curl -s http://localhost:8642/health >/dev/null 2>&1; then
+            echo "[entrypoint] Gateway ready, activating..."
+            curl -s -X POST http://localhost:8642/api/gateway/start
+            break
+        fi
+        sleep 1
+    done
+
+    wait $GATEWAY_PID
 fi
 
 echo "[entrypoint] Running hermes subcommand: $@"
