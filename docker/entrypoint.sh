@@ -149,13 +149,17 @@ esac
 # preserving the documented `docker run <image> <subcommand>` behavior.
 #
 # No arguments means server mode (gateway run) for Railway deployments.
+echo "[entrypoint] Starting with $# arguments: $@"
 if [ $# -gt 0 ] && command -v "$1" >/dev/null 2>&1; then
+    echo "[entrypoint] Running direct command: $@"
     exec "$@"
 fi
 
 # Default: if no args, run server mode
 if [ $# -eq 0 ]; then
+    echo "[entrypoint] No arguments provided, defaulting to: hermes gateway run"
     exec hermes gateway run
 fi
 
+echo "[entrypoint] Running hermes subcommand: $@"
 exec hermes "$@"
