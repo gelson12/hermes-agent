@@ -20,6 +20,9 @@ RUN apt-get update && \
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
 RUN useradd -u 10000 -m -d /opt/data hermes
 
+# Cache buster: force rebuild of all layers after this point
+RUN echo "Build timestamp: $(date)" && true
+
 COPY --chmod=0755 --from=gosu_source /gosu /usr/local/bin/
 COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 
