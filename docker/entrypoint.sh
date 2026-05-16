@@ -96,8 +96,10 @@ if [ ! -f "$HERMES_HOME/auth.json" ] && [ -n "$HERMES_AUTH_JSON_BOOTSTRAP" ]; th
 fi
 
 # Sync bundled skills (manifest-based so user edits are preserved)
+# Non-fatal: if skills sync fails, gateway still starts
 if [ -d "$INSTALL_DIR/skills" ]; then
-    python3 "$INSTALL_DIR/tools/skills_sync.py"
+    python3 "$INSTALL_DIR/tools/skills_sync.py" || \
+        echo "⚠️  Warning: skills sync failed, but continuing with gateway startup"
 fi
 
 # Optionally start `hermes dashboard` as a side-process.
