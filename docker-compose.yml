@@ -41,6 +41,8 @@ services:
       # Browser / Playwright
       - PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
       - BROWSER_HEADLESS=true
+      # Gateway health probe (for dashboard status reporting)
+      - GATEWAY_HEALTH_URL=http://localhost:8642/health/detailed
       # LLM Providers — Railway variables inherited automatically
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
