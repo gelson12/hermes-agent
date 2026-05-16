@@ -8,8 +8,8 @@
 model:
   # Default model to use (can be overridden with --model flag)
   # Both "default" and "model" work as the key name here.
-  default: "anthropic/claude-opus-4.6"
-  
+  default: "google/gemini-2.5-flash:free"
+
   # Inference provider selection:
   #   "auto"         - Auto-detect from credentials (default)
   #   "openrouter"   - OpenRouter (requires: OPENROUTER_API_KEY or OPENAI_API_KEY)
@@ -39,11 +39,16 @@ model:
   #   It works with both no-auth and auth-enabled server modes.
   #
   # Can also be overridden with --provider flag or HERMES_INFERENCE_PROVIDER env var.
-  provider: "auto"
-  
+  provider: "openrouter"
+
   # API configuration (falls back to OPENROUTER_API_KEY env var)
   # api_key: "your-key-here"  # Uncomment to set here instead of .env
   base_url: "https://openrouter.ai/api/v1"
+
+  # Fallback model chain: when the primary model is rate-limited or unavailable
+  fallback_model:
+    - "groq/mixtral-8x7b-32768"
+    - "sambanova/deepseek-ai/DeepSeek-R1"
 
   # ── Token limits — two settings, easy to confuse ──────────────────────────
   #
