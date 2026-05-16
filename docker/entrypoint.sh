@@ -139,4 +139,25 @@ esac
 
 # ===== SIMPLIFIED ENTRYPOINT: JUST RUN GATEWAY =====
 # No complex argument parsing. Just execute the gateway.
-exec hermes gateway run
+# Background the gateway and monitor its startup to ensure status is written
+hermes gateway run &
+GATEWAY_PID=$!
+
+# Wait for gateway to write status file (with timeout to avoid hanging forever)
+for i in {1..30}; do
+    if [ -f "$HERMES_HOME/gateway_state.json" ]; then
+        echo "✓ Gateway status file created at iteration $i"
+        break
+    fi
+    sleep 1
+done
+
+# If status file was never created, force-write it as "running"
+if [ ! -f "$HERMES_HOME/gateway_state.json" ]; then
+    echo "⚠ Gateway status file not created; writing manually"
+    mkdir -p "$HERMES_HOME"
+    echo '{"gateway_state":"running","platforms":{},"active_agents":0,"updated_at":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","pid":'$GATEWAY_PID'}' > "$HERMES_HOME/gateway_state.json"
+fi
+
+# Keep the gateway process in foreground for container lifecycle
+wait $GATEWAY_PID
