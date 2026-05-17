@@ -714,13 +714,13 @@ def _resolve_runtime_agent_kwargs() -> dict:
             f"Hermes MUST use ONLY Gemini API. No OpenRouter allowed."
         )
 
-    if resolved_provider != "gemini":
+    if resolved_provider not in ("gemini", "google", "google-gemini"):
         raise RuntimeError(
             f"FATAL: Execution Invariant Violation (INV-04)\n"
-            f"Expected provider='gemini', got provider='{resolved_provider}'\n"
-            f"Hermes is configured to use ONLY Gemini API.\n"
+            f"Expected provider to be Google/Gemini, got provider='{resolved_provider}'\n"
+            f"Hermes is configured to use ONLY Gemini API (via Google provider).\n"
             f"OpenRouter, OpenAI, Anthropic, and other providers are forbidden.\n"
-            f"Check config.yaml: model.provider must be 'gemini'\n"
+            f"Check config.yaml: model.provider must be 'google' or 'gemini'\n"
             f"Or check Railway environment variables for API key overrides."
         )
 
