@@ -1001,6 +1001,20 @@ def _load_gateway_config() -> dict:
                 return yaml.safe_load(f) or {}
     except Exception:
         logger.debug("Could not load gateway config from %s", config_path)
+
+    # Fallback: check /opt/hermes/config.yaml if HERMES_HOME path doesn't have it
+    # This handles the case where config.yaml is in the app directory but not in /opt/data
+    try:
+        from pathlib import Path
+        app_config_path = Path('/opt/hermes/config.yaml')
+        if app_config_path.exists() and app_config_path != config_path:
+            import yaml
+            with open(app_config_path, 'r', encoding='utf-8') as f:
+                logger.debug("Loading fallback config from %s", app_config_path)
+                return yaml.safe_load(f) or {}
+    except Exception:
+        pass
+
     return {}
 
 

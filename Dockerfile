@@ -111,8 +111,8 @@ RUN uv pip install --no-cache-dir --no-deps -e "."
 
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
-ENV HERMES_HOME=/opt/hermes
-ENV PATH="/opt/hermes/.local/bin:${PATH}"
+ENV HERMES_HOME=/opt/data
+ENV PATH="/opt/data/.local/bin:${PATH}"
 # Final entrypoint: runs Hermes API gateway on port 8642
 # REBUILD TRIGGER: venv permissions fix in chown command
 ENTRYPOINT [ "/usr/bin/tini", "-g", "--", "/opt/hermes/docker/entrypoint.sh", "gateway", "run" ]
