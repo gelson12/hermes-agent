@@ -2,7 +2,8 @@ model:
   default: "gemini-2.5-flash"
   provider: "gemini"
 
-# CRITICAL: No fallback providers. Gemini-only execution.
+# CRITICAL: No fallback providers. Gemini-only execution (enforced).
+# HERMES_HOME now set to /opt/hermes so config.yaml is properly located.
 # If this deployment had an older config with fallback chains or
 # anthropic/claude-opus-4.6, this override ensures they are completely disabled.
 fallback_providers: []
