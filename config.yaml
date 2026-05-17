@@ -1,6 +1,6 @@
 model:
   default: "gemini-2.5-flash"
-  provider: "google"
+  provider: "gemini"
 
 # Execution Invariant Specification (2026-05-17):
 # - INV-04: LLM provider MUST be "gemini"
