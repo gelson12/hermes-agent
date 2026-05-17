@@ -1659,15 +1659,21 @@ class AIAgent:
                         except Exception:
                             pass
                         # --- Init-time fallback (#17929) ---
+                        # CONSTRAINT: Gemini-only path must never activate fallback.
+                        # For Gemini provider, skip init-time fallback activation entirely.
                         _fb_entries = []
-                        if isinstance(fallback_model, list):
-                            _fb_entries = [
-                                f for f in fallback_model
-                                if isinstance(f, dict) and f.get("provider") and f.get("model")
-                            ]
-                        elif isinstance(fallback_model, dict) and fallback_model.get("provider") and fallback_model.get("model"):
-                            _fb_entries = [fallback_model]
+                        if self.provider != "gemini":  # Only allow fallback for non-Gemini providers
+                            if isinstance(fallback_model, list):
+                                _fb_entries = [
+                                    f for f in fallback_model
+                                    if isinstance(f, dict) and f.get("provider") and f.get("model")
+                                ]
+                            elif isinstance(fallback_model, dict) and fallback_model.get("provider") and fallback_model.get("model"):
+                                _fb_entries = [fallback_model]
                         _fb_resolved = False
+                        # For Gemini, skip fallback resolution loop (no fallback allowed)
+                        if self.provider == "gemini":
+                            _fb_resolved = True
                         for _fb in _fb_entries:
                             _fb_explicit_key = (_fb.get("api_key") or "").strip() or None
                             if not _fb_explicit_key:
