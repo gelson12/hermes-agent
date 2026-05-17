@@ -1,3 +1,14 @@
 model:
-  default: "google/gemini-2.5-flash:free"
-  provider: "openrouter"
+  default: "gemini-2.5-flash"
+  provider: "gemini"
+
+# Execution Invariant Specification (2026-05-17):
+# - INV-04: LLM provider MUST be "gemini"
+# - INV-05: LLM model MUST be "gemini-2.5-flash"
+# - INV-08: fallback_providers MUST be empty (or omitted)
+# - INV-09: OpenRouter is never contacted
+# - INV-10: OpenAI API is never contacted
+# - INV-11: Anthropic API is never contacted
+#
+# This configuration enforces a single deterministic path:
+#   Hermes → generativelanguage.googleapis.com → Gemini 2.5 Flash

@@ -1389,6 +1389,31 @@ def _try_openrouter(explicit_api_key: str = None) -> Tuple[Optional[OpenAI], Opt
                    default_headers=build_or_headers()), _OPENROUTER_MODEL
 
 
+def _try_gemini_native(explicit_api_key: str = None) -> Tuple[Optional[object], Optional[str]]:
+    """Try native Gemini API for auxiliary tasks.
+
+    Enforces INV-12: Auxiliary model routing must use Gemini, not OpenRouter.
+    Returns GeminiNativeClient + model name, or (None, None) if unavailable.
+    """
+    try:
+        from agent.gemini_native_adapter import GeminiNativeClient
+    except ImportError:
+        logger.debug("Auxiliary client: GeminiNativeClient not available")
+        return None, None
+
+    api_key = explicit_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        logger.debug("Auxiliary client: GOOGLE_API_KEY not set, Gemini unavailable")
+        return None, None
+
+    try:
+        logger.debug("Auxiliary client: Using Gemini native for auxiliary tasks")
+        return GeminiNativeClient(api_key=api_key), "gemini-2.5-flash"
+    except Exception as e:
+        logger.debug(f"Auxiliary client: Gemini native init failed: {e}")
+        return None, None
+
+
 def _describe_openrouter_unavailable() -> str:
     """Return a more precise OpenRouter auth failure reason for logs."""
     pool_present, entry = _select_pool_entry("openrouter")
@@ -1815,6 +1840,11 @@ def _get_provider_chain() -> List[tuple]:
     Built at call time (not module level) so that test patches
     on the ``_try_*`` functions are picked up correctly.
 
+    ENFORCEMENT (Execution Invariant Specification 2026-05-17):
+    - INV-12: Auxiliary model routing uses Gemini native, never OpenRouter
+    - Gemini is now the PRIMARY auxiliary provider
+    - OpenRouter is removed from the chain to enforce single-path guarantee
+
     NOTE: ``openai-codex`` is deliberately NOT in this chain.  The
     ChatGPT-account Codex endpoint only accepts a shifting, undocumented
     allow-list of model IDs, so falling back to it with a guessed model
@@ -1823,10 +1853,11 @@ def _get_provider_chain() -> List[tuple]:
     a caller explicitly requests it with a model.
     """
     return [
-        ("openrouter", _try_openrouter),
+        ("gemini-native", _try_gemini_native),  # PRIMARY: Gemini native (INV-12)
         ("nous", _try_nous),
         ("local/custom", _try_custom_endpoint),
         ("api-key", _resolve_api_key_provider),
+        # REMOVED: ("openrouter", _try_openrouter) — violates INV-09
     ]
 
 
