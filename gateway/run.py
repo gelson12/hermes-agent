@@ -705,7 +705,6 @@ def _resolve_runtime_agent_kwargs() -> dict:
     resolved_endpoint = runtime.get("base_url", "").strip().lower()
 
     # CRITICAL: Check for environment variable pollution that overrides config.yaml
-    import os
     if os.getenv("OPENROUTER_API_KEY"):
         raise RuntimeError(
             f"FATAL: Environment Variable Violation (INV-09)\n"
