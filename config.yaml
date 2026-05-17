@@ -2,6 +2,12 @@ model:
   default: "gemini-2.5-flash"
   provider: "gemini"
 
+# CRITICAL: No fallback providers. Gemini-only execution.
+# If this deployment had an older config with fallback chains or
+# anthropic/claude-opus-4.6, this override ensures they are completely disabled.
+fallback_providers: []
+fallback_model: null
+
 # Execution Invariant Specification (2026-05-17):
 # - INV-04: LLM provider MUST be "gemini"
 # - INV-05: LLM model MUST be "gemini-2.5-flash"
