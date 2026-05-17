@@ -4207,6 +4207,11 @@ def call_llm(
 
     # Handle unsupported temperature, max_tokens vs max_completion_tokens retry,
     # then payment fallback.
+    # RUNTIME VERIFICATION: Log auxiliary client request details
+    logger.info(
+        "🔍 AUXILIARY_LLM_REQUEST: task=%s, provider=%s, model=%s, base_url=%s, client_type=%s",
+        task, resolved_provider, final_model, kwargs.get("base_url", ""), type(client).__name__
+    )
     try:
         return _validate_llm_response(
             client.chat.completions.create(**kwargs), task)

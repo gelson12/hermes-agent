@@ -828,6 +828,15 @@ class APIServerAdapter(BasePlatformAdapter):
         reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
 
+        # RUNTIME VERIFICATION: Log resolved model and provider
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "🔍 API_SERVER_AGENT_INIT: resolved_model=%s, provider_from_kwargs=%s",
+            model,
+            runtime_kwargs.get("provider", "NOT_SET")
+        )
+
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 

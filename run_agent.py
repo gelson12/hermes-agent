@@ -1199,6 +1199,11 @@ class AIAgent:
         self.base_url = base_url or ""
         provider_name = provider.strip().lower() if isinstance(provider, str) and provider.strip() else None
         self.provider = provider_name or ""
+        # RUNTIME VERIFICATION: Log provider and model at AIAgent init
+        logger.info(
+            "🔍 AIAGENT_INIT: model=%s, provider=%s, base_url=%s",
+            model, self.provider, self.base_url
+        )
         self.acp_command = acp_command or command
         self.acp_args = list(acp_args or args or [])
         if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse"}:
@@ -6286,12 +6291,17 @@ class AIAgent:
         client_kwargs = dict(client_kwargs)
         _validate_proxy_env_urls()
         _validate_base_url(client_kwargs.get("base_url"))
+        # RUNTIME VERIFICATION: Log which client path is being taken
+        logger.info(
+            "🔍 _CREATE_OPENAI_CLIENT: provider=%s, base_url=%s, reason=%s",
+            self.provider, client_kwargs.get("base_url", ""), reason
+        )
         if self.provider == "copilot-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://copilot"):
             from agent.copilot_acp_client import CopilotACPClient
 
             client = CopilotACPClient(**client_kwargs)
             logger.info(
-                "Copilot ACP client created (%s, shared=%s) %s",
+                "🔍 CLIENT_CREATED: type=CopilotACP (%s, shared=%s) %s",
                 reason,
                 shared,
                 self._client_log_context(),
@@ -6307,7 +6317,7 @@ class AIAgent:
             }
             client = GeminiCloudCodeClient(**safe_kwargs)
             logger.info(
-                "Gemini Cloud Code Assist client created (%s, shared=%s) %s",
+                "🔍 CLIENT_CREATED: type=GeminiCloudCode (%s, shared=%s) %s",
                 reason,
                 shared,
                 self._client_log_context(),
@@ -6328,7 +6338,7 @@ class AIAgent:
                         safe_kwargs["http_client"] = keepalive_http
                 client = GeminiNativeClient(**safe_kwargs)
                 logger.info(
-                    "Gemini native client created (%s, shared=%s) %s",
+                    "🔍 CLIENT_CREATED: type=GeminiNative (%s, shared=%s) %s",
                     reason,
                     shared,
                     self._client_log_context(),
@@ -6357,6 +6367,15 @@ class AIAgent:
                 client_kwargs["http_client"] = keepalive_http
         # Uses the module-level `OpenAI` name, resolved lazily on first
         # access via __getattr__ below. Tests patch via `run_agent.OpenAI`.
+        # RUNTIME VERIFICATION: Log that OpenAI SDK client is being created (not Gemini)
+        logger.warning(
+            "🔍 CLIENT_CREATED: type=OpenAI (NOT Gemini!) provider=%s, base_url=%s (%s, shared=%s) %s",
+            self.provider,
+            client_kwargs.get("base_url", ""),
+            reason,
+            shared,
+            self._client_log_context(),
+        )
         client = OpenAI(**client_kwargs)
         logger.info(
             "OpenAI client created (%s, shared=%s) %s",

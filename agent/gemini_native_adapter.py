@@ -899,6 +899,11 @@ class GeminiNativeClient:
             return self._stream_completion(model=model, request=request, timeout=timeout)
 
         url = f"{self.base_url}/models/{model}:generateContent"
+        # RUNTIME VERIFICATION: Log actual Gemini API request
+        logger.info(
+            "🔍 GEMINI_NATIVE_REQUEST: url=%s, model=%s, base_url=%s",
+            url, model, self.base_url
+        )
         response = self._http.post(url, json=request, headers=self._headers(), timeout=timeout)
         if response.status_code != 200:
             raise gemini_http_error(response)
@@ -915,6 +920,11 @@ class GeminiNativeClient:
 
     def _stream_completion(self, *, model: str, request: Dict[str, Any], timeout: Any = None) -> Iterator[_GeminiStreamChunk]:
         url = f"{self.base_url}/models/{model}:streamGenerateContent?alt=sse"
+        # RUNTIME VERIFICATION: Log actual Gemini streaming API request
+        logger.info(
+            "🔍 GEMINI_NATIVE_STREAM_REQUEST: url=%s, model=%s, base_url=%s",
+            url, model, self.base_url
+        )
         stream_headers = dict(self._headers())
         stream_headers["Accept"] = "text/event-stream"
 
