@@ -1754,7 +1754,15 @@ class AIAgent:
         # when the primary is exhausted (rate-limit, overload, connection
         # failure).  Supports both legacy single-dict ``fallback_model`` and
         # new list ``fallback_providers`` format.
-        if isinstance(fallback_model, list):
+
+        # ABSOLUTE CONSTRAINT: Gemini-only execution path must NEVER load fallback providers
+        # from config, regardless of what config.yaml contains. This is an invariant
+        # that cannot be overridden by configuration to prevent accidental provider
+        # switching in Gemini-only deployments.
+        if self.provider == "gemini":
+            # Force empty fallback chain for Gemini - no configuration can override this
+            self._fallback_chain = []
+        elif isinstance(fallback_model, list):
             self._fallback_chain = [
                 f for f in fallback_model
                 if isinstance(f, dict) and f.get("provider") and f.get("model")
@@ -1762,11 +1770,6 @@ class AIAgent:
         elif isinstance(fallback_model, dict) and fallback_model.get("provider") and fallback_model.get("model"):
             self._fallback_chain = [fallback_model]
         else:
-            self._fallback_chain = []
-
-        # CONSTRAINT: Gemini-only path must never activate runtime fallback.
-        # Clear the fallback chain completely for Gemini provider.
-        if self.provider == "gemini":
             self._fallback_chain = []
 
         self._fallback_index = 0
