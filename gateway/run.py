@@ -704,13 +704,25 @@ def _resolve_runtime_agent_kwargs() -> dict:
     resolved_provider = runtime.get("provider", "").strip().lower()
     resolved_endpoint = runtime.get("base_url", "").strip().lower()
 
+    # CRITICAL: Check for environment variable pollution that overrides config.yaml
+    import os
+    if os.getenv("OPENROUTER_API_KEY"):
+        raise RuntimeError(
+            f"FATAL: Environment Variable Violation (INV-09)\n"
+            f"OPENROUTER_API_KEY is set in Railway environment.\n"
+            f"This overrides config.yaml and forces provider='openrouter'.\n"
+            f"SOLUTION: Remove OPENROUTER_API_KEY from Railway → hermes-agent → Variables\n"
+            f"Hermes MUST use ONLY Gemini API. No OpenRouter allowed."
+        )
+
     if resolved_provider != "gemini":
         raise RuntimeError(
             f"FATAL: Execution Invariant Violation (INV-04)\n"
             f"Expected provider='gemini', got provider='{resolved_provider}'\n"
             f"Hermes is configured to use ONLY Gemini API.\n"
             f"OpenRouter, OpenAI, Anthropic, and other providers are forbidden.\n"
-            f"Check config.yaml: model.provider must be 'gemini'"
+            f"Check config.yaml: model.provider must be 'gemini'\n"
+            f"Or check Railway environment variables for API key overrides."
         )
 
     if "generativelanguage.googleapis.com" not in resolved_endpoint:
