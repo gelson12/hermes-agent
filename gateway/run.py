@@ -699,6 +699,28 @@ def _resolve_runtime_agent_kwargs() -> dict:
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
+    # HARD ENFORCEMENT: Jarvis Execution Invariant Specification (INV-04, INV-09)
+    # System MUST use Gemini only. No OpenRouter, OpenAI, or Anthropic.
+    resolved_provider = runtime.get("provider", "").strip().lower()
+    resolved_endpoint = runtime.get("base_url", "").strip().lower()
+
+    if resolved_provider != "gemini":
+        raise RuntimeError(
+            f"FATAL: Execution Invariant Violation (INV-04)\n"
+            f"Expected provider='gemini', got provider='{resolved_provider}'\n"
+            f"Hermes is configured to use ONLY Gemini API.\n"
+            f"OpenRouter, OpenAI, Anthropic, and other providers are forbidden.\n"
+            f"Check config.yaml: model.provider must be 'gemini'"
+        )
+
+    if "generativelanguage.googleapis.com" not in resolved_endpoint:
+        raise RuntimeError(
+            f"FATAL: Execution Invariant Violation (INV-03)\n"
+            f"Expected endpoint to contain 'generativelanguage.googleapis.com'\n"
+            f"Got endpoint='{resolved_endpoint}'\n"
+            f"Hermes LLM calls must go to Google Gemini API only."
+        )
+
     return {
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
