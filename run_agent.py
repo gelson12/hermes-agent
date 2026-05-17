@@ -1759,9 +1759,16 @@ class AIAgent:
         # from config, regardless of what config.yaml contains. This is an invariant
         # that cannot be overridden by configuration to prevent accidental provider
         # switching in Gemini-only deployments.
-        if self.provider == "gemini":
+        #
+        # NUCLEAR OPTION: Also check environment variable to force Gemini-only
+        # even if config.yaml has stale fallback_model entries.
+        force_gemini_only = os.getenv("HERMES_FORCE_GEMINI_ONLY", "").lower() in ("true", "1", "yes")
+        if self.provider == "gemini" or force_gemini_only:
             # Force empty fallback chain for Gemini - no configuration can override this
             self._fallback_chain = []
+            if force_gemini_only and self.provider != "gemini":
+                # If forced via env var but provider isn't Gemini, override it
+                self.provider = "gemini"
         elif isinstance(fallback_model, list):
             self._fallback_chain = [
                 f for f in fallback_model
