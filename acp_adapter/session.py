@@ -593,12 +593,6 @@ class SessionManager:
             if not isinstance(cfg, dict) or cfg.get("enabled", True) is not False
         ]
 
-        # Resolve the actual model: "hermes-agent" is a proxy name that must be
-        # replaced with the provider's default model from config.yaml
-        effective_model = model
-        if (model or "").strip() in ("hermes-agent", ""):
-            effective_model = default_model or model
-
         kwargs = {
             "platform": "acp",
             "enabled_toolsets": _expand_acp_enabled_toolsets(
@@ -608,7 +602,7 @@ class SessionManager:
             "quiet_mode": True,
             "session_id": session_id,
             "session_db": self._get_db(),
-            "model": effective_model,
+            "model": model or default_model,
         }
 
         try:
