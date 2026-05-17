@@ -1763,6 +1763,12 @@ class AIAgent:
             self._fallback_chain = [fallback_model]
         else:
             self._fallback_chain = []
+
+        # CONSTRAINT: Gemini-only path must never activate runtime fallback.
+        # Clear the fallback chain completely for Gemini provider.
+        if self.provider == "gemini":
+            self._fallback_chain = []
+
         self._fallback_index = 0
         self._fallback_activated = getattr(self, "_fallback_activated", False)
         # Legacy attribute kept for backward compat (tests, external callers)
