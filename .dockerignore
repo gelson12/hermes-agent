@@ -35,3 +35,9 @@ Hermes-agent
 Hermes-agent/
 hermes-agent
 hermes-agent/
+
+# Excluded from `railway up` to shrink upload size (not needed at runtime).
+# These remain in the GitHub repo, just not pushed via local CLI uploads.
+tests/
+website/
+docs/
