@@ -2,6 +2,16 @@ model:
   default: "gemini-2.5-flash"
   provider: "gemini"
 
+# Vault memory provider (Obsidian Vault on Railway) — activates the
+# self-improvement loop: cross-session recall before each turn + Q+A
+# write-back after each turn.  Requires VAULT_SECRET env var.  Gracefully
+# no-ops when the secret is missing, so this config is safe even on dev
+# boxes without vault access.  Compatible with the Gemini-only invariants
+# below because routing is purely read-side here (recall enriches context;
+# model selection stays gated by HERMES_VAULT_ROUTING_ENABLED env var).
+memory:
+  provider: "vault"
+
 # CRITICAL: No fallback providers. Gemini-only execution (enforced).
 # HERMES_HOME now set to /opt/hermes so config.yaml is properly located.
 # If this deployment had an older config with fallback chains or

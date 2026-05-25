@@ -804,6 +804,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        model_override: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -828,13 +829,21 @@ class APIServerAdapter(BasePlatformAdapter):
         reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
 
+        # Vault-aware routing: the chat/completions handler may compute a cheaper
+        # model when the Obsidian Vault already covers the topic. The override
+        # is applied here so the AIAgent is constructed with the routed model
+        # rather than the gateway default.
+        if model_override:
+            model = model_override
+
         # RUNTIME VERIFICATION: Log resolved model and provider
         import logging
         logger = logging.getLogger(__name__)
         logger.info(
-            "🔍 API_SERVER_AGENT_INIT: resolved_model=%s, provider_from_kwargs=%s",
+            "🔍 API_SERVER_AGENT_INIT: resolved_model=%s, provider_from_kwargs=%s, override=%s",
             model,
-            runtime_kwargs.get("provider", "NOT_SET")
+            runtime_kwargs.get("provider", "NOT_SET"),
+            bool(model_override),
         )
 
         user_config = _load_gateway_config()
@@ -1094,6 +1103,39 @@ class APIServerAdapter(BasePlatformAdapter):
         model_name = body.get("model", self._model_name)
         created = int(time.time())
 
+        # Vault-aware routing decision (Phase 2 of the self-improvement loop).
+        # Probes the Obsidian Vault for prior Q+A overlap on the current user
+        # message, then picks cheap/mid/big tier accordingly. Decision is
+        # logged unconditionally for the n8n maturity-tracker cron. The
+        # actual model swap is gated behind HERMES_VAULT_ROUTING_ENABLED so
+        # invariant deployments (e.g. Gemini-only INV-04/05) can opt out
+        # while still benefiting from recall + feedback.
+        vault_model_override: Optional[str] = None
+        try:
+            from agent.vault_router import probe_vault, select_model as _select_model
+            from plugins.memory.vault.provider import _domain_from_kwargs as _vault_domain
+            user_text = user_message if isinstance(user_message, str) else _normalize_chat_content(user_message)
+            _domain = _vault_domain("api_server", gateway_session_key or "")
+            _conf, _hits = probe_vault(user_text, _domain)
+            _decision = _select_model(
+                query=user_text,
+                vault_confidence=_conf,
+                vault_hits=_hits,
+                domain=_domain,
+                default_model=self._model_name,
+            )
+            _routing_enabled = os.environ.get("HERMES_VAULT_ROUTING_ENABLED", "").lower() in ("1", "true", "yes", "on")
+            if _routing_enabled and _decision.model and _decision.tier != "big":
+                vault_model_override = _decision.model
+            logger.info(
+                "hermes.routing.decision tier=%s model=%s conf=%.2f hits=%d domain=%s applied=%s reason=%s",
+                _decision.tier, _decision.model or "(default)", _decision.confidence,
+                _decision.hits, _decision.domain, bool(vault_model_override),
+                _decision.reason,
+            )
+        except Exception as _exc:
+            logger.debug("vault routing skipped: %s", _exc)
+
         if stream:
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
@@ -1176,6 +1218,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                model_override=vault_model_override,
             ))
 
             return await self._write_sse_chat_completion(
@@ -1192,6 +1235,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                model_override=vault_model_override,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -2693,6 +2737,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        model_override: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -2716,6 +2761,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_start_callback=tool_start_callback,
                 tool_complete_callback=tool_complete_callback,
                 gateway_session_key=gateway_session_key,
+                model_override=model_override,
             )
             if agent_ref is not None:
                 agent_ref[0] = agent
@@ -3351,6 +3397,18 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/responses", self._handle_responses)
+            # Vault self-improvement loop: feedback (Phase 3) and maturity (Phase 4)
+            try:
+                from plugins.memory.vault.feedback import (
+                    handle_feedback as _handle_vault_feedback,
+                    handle_maturity_get as _handle_vault_maturity_get,
+                    handle_maturity_put as _handle_vault_maturity_put,
+                )
+                self._app.router.add_post("/v1/feedback", _handle_vault_feedback)
+                self._app.router.add_get("/v1/routing/maturity", _handle_vault_maturity_get)
+                self._app.router.add_put("/v1/routing/maturity", _handle_vault_maturity_put)
+            except Exception as _vault_route_exc:
+                logger.debug("vault routes not registered: %s", _vault_route_exc)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
             # Cron jobs management API

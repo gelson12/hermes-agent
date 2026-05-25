@@ -1,0 +1,4 @@
+name: vault
+description: Obsidian Vault on Railway — cross-session, cross-agent recall. Q+A pairs written each turn, retrieved as context next turn. Used by OpenJarvis, friday_jarvis2, and any Hermes consumer.
+version: 1.0.0
+author: Jarvis
