@@ -126,7 +126,11 @@ class ObsidianMindClient:
         tags: Optional[List[str]] = None,
         title: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        source: Optional[str] = None,
+        **extra: Any,
     ) -> Optional[Dict[str, Any]]:
+        # `source` and other extra kwargs are accepted (for API parity with
+        # the super-agent VaultClient) and folded into metadata.
         # Obsidian-mind exposes POST /api/notes/:path — the note path goes
         # in the URL.  When OBSIDIAN_MIND_INGEST_PATH ends with `/` (or
         # is the bare directory form) we synthesize a unique filename
@@ -139,13 +143,20 @@ class ObsidianMindClient:
             tag_slug = (tags[1] if tags and len(tags) > 1 else "general").replace("/", "-")
             path = path.rstrip("/") + f"/hermes/{tag_slug}/{stamp}-{short}.md"
 
+        # Fold source + any extra kwargs into the metadata dict so they survive.
+        effective_meta: Dict[str, Any] = dict(metadata) if isinstance(metadata, dict) else {}
+        if source:
+            effective_meta.setdefault("source", source)
+        for k, v in (extra or {}).items():
+            effective_meta.setdefault(k, v)
+
         body: Dict[str, Any] = {self._ingest_field: content}
         if title:
             body["title"] = title
         if tags:
             body["tags"] = tags
-        if metadata:
-            body["metadata"] = metadata
+        if effective_meta:
+            body["metadata"] = effective_meta
         try:
             resp = self._client.request(
                 self._ingest_method,
