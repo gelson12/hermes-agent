@@ -376,6 +376,8 @@ class ToolRegistry:
         * Async handlers are bridged automatically via ``_run_async()``.
         * All exceptions are caught and returned as ``{"error": "..."}``
           for consistent error format.
+        * Phase 5 — failures are recorded by the vault tool-sentinel
+          (best-effort, gated by HERMES_TOOL_SENTINEL_ENABLED).
         """
         entry = self.get_entry(name)
         if not entry:
@@ -383,11 +385,29 @@ class ToolRegistry:
         try:
             if entry.is_async:
                 from model_tools import _run_async
-                return _run_async(entry.handler(args, **kwargs))
-            return entry.handler(args, **kwargs)
+                result = _run_async(entry.handler(args, **kwargs))
+            else:
+                result = entry.handler(args, **kwargs)
         except Exception as e:
             logger.exception("Tool %s dispatch error: %s", name, e)
+            # Record the failure for the sentinel.  Pure best-effort.
+            try:
+                from plugins.memory.vault.tool_sentinel import record_failure as _record_failure
+                _record_failure(name, args=args, error=e)
+            except Exception:
+                pass
             return json.dumps({"error": f"Tool execution failed: {type(e).__name__}: {e}"})
+
+        # Tool returned (no exception) but may have returned a tool_error JSON.
+        try:
+            if isinstance(result, str) and result.startswith("{") and '"error"' in result:
+                parsed = json.loads(result)
+                if isinstance(parsed, dict) and parsed.get("error"):
+                    from plugins.memory.vault.tool_sentinel import record_failure as _record_failure
+                    _record_failure(name, args=args, error=str(parsed.get("error"))[:240])
+        except Exception:
+            pass
+        return result
 
     # ------------------------------------------------------------------
     # Query helpers  (replace redundant dicts in model_tools.py)

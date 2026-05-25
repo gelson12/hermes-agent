@@ -1136,6 +1136,106 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception as _exc:
             logger.debug("vault routing skipped: %s", _exc)
 
+        # Phase 7 — prompt evolver: per-domain system-prompt swap (gated by
+        # HERMES_PROMPT_EVOLVER_ENABLED, default off).  Append any active
+        # variant to the ephemeral system prompt the client may have sent.
+        try:
+            from agent import prompt_evolver as _evolver
+            from plugins.memory.vault.provider import _domain_from_kwargs as _vault_domain2
+            _ev_domain = _vault_domain2("api_server", gateway_session_key or "")
+            _ev_prompt = _evolver.current_prompt(_ev_domain)
+            if _ev_prompt:
+                if system_prompt:
+                    system_prompt = system_prompt + "\n\n" + _ev_prompt
+                else:
+                    system_prompt = _ev_prompt
+                logger.info("hermes.evolver.applied domain=%s", _ev_domain)
+        except Exception as _ev_exc:
+            logger.debug("prompt_evolver injection skipped: %s", _ev_exc)
+
+        # Phase 2 — planner: multi-step queries get decomposed off-path through
+        # the auxiliary client, executed via tier-routed subtask calls, and
+        # recomposed.  Skips the normal AIAgent path entirely when invoked.
+        # Phase 3+4 — reflector hook AND distiller hook fire after a successful
+        # planner run.
+        if not stream:
+            try:
+                from agent import planner as _planner
+                user_text_for_plan = user_message if isinstance(user_message, str) else _normalize_chat_content(user_message)
+                if _planner.should_plan(user_text_for_plan):
+                    _plan_result = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: _planner.run(user_text_for_plan)
+                    )
+                    if _plan_result and _plan_result.get("answer"):
+                        _answer = _plan_result["answer"]
+                        logger.info(
+                            "hermes.planner.completed subtasks=%d elapsed=%dms success=%s",
+                            len(_plan_result.get("plan", [])),
+                            _plan_result.get("elapsed_ms", 0),
+                            _plan_result.get("success", False),
+                        )
+
+                        # Fire reflector + distiller asynchronously.  They feed
+                        # the next turn's recall + write skills based on this
+                        # successful multi-step run.
+                        def _post_planner():
+                            try:
+                                from plugins.memory.vault.reflection import reflect_async, last_reflection
+                                from plugins.memory.vault.client import from_env as _vault_from_env
+                                from plugins.memory.vault.obsidian_mind import from_env as _mind_from_env
+                                reflect_async(
+                                    session_id=session_id,
+                                    user_text=user_text_for_plan,
+                                    assistant_text=_answer,
+                                    domain=_ev_domain,
+                                    platform="api_server",
+                                    vault_client=_vault_from_env(),
+                                    mind_client=_mind_from_env(),
+                                )
+                                # Give reflection a short window to finish before
+                                # checking whether to distill.
+                                import time as _t
+                                _t.sleep(2.5)
+                                reflection = last_reflection(session_id)
+                                from plugins.memory.vault.distiller import should_distill, distill_async
+                                if should_distill(_plan_result.get("plan", []), _plan_result.get("results", []), reflection):
+                                    distill_async(
+                                        user_text_for_plan,
+                                        _plan_result["plan"],
+                                        _plan_result["results"],
+                                        reflection,
+                                    )
+                            except Exception as _pp_exc:
+                                logger.debug("post-planner reflect/distill skipped: %s", _pp_exc)
+                        import threading as _th
+                        _th.Thread(target=_post_planner, daemon=True, name="hermes-post-planner").start()
+
+                        # Build an OpenAI-style chat completion response inline
+                        # so we skip the AIAgent path entirely.
+                        return web.json_response({
+                            "id": completion_id,
+                            "object": "chat.completion",
+                            "created": created,
+                            "model": model_name,
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": _answer},
+                                "finish_reason": "stop",
+                            }],
+                            "usage": {
+                                "prompt_tokens": 0,
+                                "completion_tokens": 0,
+                                "total_tokens": 0,
+                            },
+                            "hermes_planner": {
+                                "subtasks": len(_plan_result.get("plan", [])),
+                                "elapsed_ms": _plan_result.get("elapsed_ms", 0),
+                                "success": _plan_result.get("success", False),
+                            },
+                        })
+            except Exception as _pl_exc:
+                logger.debug("planner short-circuit skipped: %s", _pl_exc)
+
         if stream:
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()

@@ -4,28 +4,36 @@ model:
 
 # Vault memory provider (Obsidian Vault on Railway) — activates the
 # self-improvement loop: cross-session recall before each turn + Q+A
-# write-back after each turn.  Requires VAULT_SECRET env var.  Gracefully
-# no-ops when the secret is missing, so this config is safe even on dev
-# boxes without vault access.  Compatible with the Gemini-only invariants
-# below because routing is purely read-side here (recall enriches context;
-# model selection stays gated by HERMES_VAULT_ROUTING_ENABLED env var).
+# write-back after each turn.  Requires VAULT_SECRET (super-agent /memory)
+# and/or OBSIDIAN_MIND_URL (obsidian-mind).  Either backend suffices;
+# super-agent is currently off for cost so obsidian-mind is the primary.
 memory:
   provider: "vault"
 
-# CRITICAL: No fallback providers. Gemini-only execution (enforced).
-# HERMES_HOME now set to /opt/hermes so config.yaml is properly located.
-# If this deployment had an older config with fallback chains or
-# anthropic/claude-opus-4.6, this override ensures they are completely disabled.
+# Default model is Gemini Flash (cheap, fast).  Agentic layers (planner,
+# reflector, distiller, prompt-evolver) may route specific subtasks to
+# other models via the VAULT_ROUTE_*_MODEL env vars when
+# HERMES_VAULT_ROUTING_ENABLED=true.  Routing is OPT-IN via env, so this
+# config alone keeps the deployment Gemini-only.
 fallback_providers: []
 fallback_model: null
 
-# Execution Invariant Specification (2026-05-17):
-# - INV-04: LLM provider MUST be "gemini"
-# - INV-05: LLM model MUST be "gemini-2.5-flash"
-# - INV-08: fallback_providers MUST be empty (or omitted)
-# - INV-09: OpenRouter is never contacted
-# - INV-10: OpenAI API is never contacted
-# - INV-11: Anthropic API is never contacted
+# Historical Execution Invariant Specification (2026-05-17, relaxed 2026-05-25):
+# - The invariants below were imposed when Hermes was deployed as a strict
+#   single-path service.  They are no longer enforced because the agentic
+#   upgrade (planner + reflector + multi-LLM routing) needs tiered model
+#   selection.  Routing is gated entirely by env vars:
+#     HERMES_VAULT_ROUTING_ENABLED   default: false  — flip to true to enable
+#     VAULT_ROUTE_CHEAP_MODEL        e.g. groq/llama-3.3-70b-versatile
+#     VAULT_ROUTE_MID_MODEL          e.g. gemini-2.5-flash (default)
+#     VAULT_ROUTE_BIG_MODEL          e.g. gemini-2.5-pro
+# - Setting HERMES_VAULT_ROUTING_ENABLED=false restores Gemini-only behaviour
+#   (the default model from this file is always used).
 #
-# This configuration enforces a single deterministic path:
-#   Hermes → generativelanguage.googleapis.com → Gemini 2.5 Flash
+# Original invariants (now PREFERENCES, not hard constraints):
+# - INV-04 (was): LLM provider MUST be "gemini"   → now: default provider is gemini
+# - INV-05 (was): LLM model MUST be "gemini-2.5-flash" → now: default model
+# - INV-08: fallback_providers MUST be empty (or omitted) — still true here
+# - INV-09: OpenRouter is never contacted — relaxable via VAULT_ROUTE_*_MODEL
+# - INV-10: OpenAI API is never contacted — relaxable via VAULT_ROUTE_*_MODEL
+# - INV-11: Anthropic API is never contacted — relaxable via VAULT_ROUTE_*_MODEL

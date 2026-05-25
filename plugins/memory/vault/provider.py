@@ -40,6 +40,8 @@ from agent.memory_provider import MemoryProvider
 
 from .client import VaultClient, from_env as client_from_env
 from .obsidian_mind import ObsidianMindClient, from_env as mind_from_env
+from . import tool_sentinel as _tool_sentinel
+from .goal_tracker import GoalTracker
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +159,7 @@ class VaultProvider(MemoryProvider):
     def __init__(self):
         self._client: Optional[VaultClient] = None
         self._mind: Optional[ObsidianMindClient] = None
+        self._goals: Optional[GoalTracker] = None
         self._session_id: str = ""
         self._domain: str = "general"
         self._platform: str = ""
@@ -204,26 +207,50 @@ class VaultProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._client = client_from_env()
         self._mind = mind_from_env()  # Secondary recall source — gracefully None.
-        if not self._client:
-            logger.warning("vault provider activated but VAULT_SECRET not set")
+        # Either backend is enough for the loop (super-agent may be intentionally off).
+        if not (self._client or self._mind):
+            logger.warning("vault provider activated but neither VAULT_SECRET nor OBSIDIAN_MIND_URL set")
             return
         self._session_id = session_id
         self._platform = str(kwargs.get("platform", "") or "")
         self._user_id = str(kwargs.get("user_id", "") or "")
         gateway_key = str(kwargs.get("gateway_session_key", "") or "")
         self._domain = _domain_from_kwargs(self._platform, gateway_key)
+
+        # Phase 5 — tool sentinel needs the same backends to write failure entries.
+        try:
+            _tool_sentinel.register_backends(vault_client=self._client, mind_client=self._mind)
+        except Exception as exc:
+            logger.debug("tool_sentinel register failed: %s", exc)
+
+        # Phase 6 — goal tracker.
+        try:
+            self._goals = GoalTracker(vault_client=self._client, mind_client=self._mind)
+        except Exception as exc:
+            logger.debug("goal_tracker init failed: %s", exc)
+            self._goals = None
+
         logger.info(
-            "vault provider initialized session=%s domain=%s platform=%s mind=%s",
-            session_id, self._domain, self._platform, bool(self._mind),
+            "vault provider initialized session=%s domain=%s platform=%s mind=%s goals=%s",
+            session_id, self._domain, self._platform, bool(self._mind), bool(self._goals),
         )
 
     def system_prompt_block(self) -> str:
-        return (
-            "# Vault Memory\n"
+        parts = [
+            "# Vault Memory",
             f"Active (domain: {self._domain}). Prior Q+A pairs may appear in <memory-context>. "
             "If the retrieved context already answers the user, respond directly without redoing "
-            "research or tool calls. The vault is authoritative for past decisions and learned facts."
-        )
+            "research or tool calls. The vault is authoritative for past decisions and learned facts.",
+        ]
+        # Phase 6 — inject active goals so the agent stays aligned across sessions.
+        if self._goals is not None:
+            try:
+                gb = self._goals.active_goals_block(max_goals=5)
+                if gb:
+                    parts.append(gb)
+            except Exception as exc:
+                logger.debug("goal_tracker active_goals_block failed: %s", exc)
+        return "\n\n".join(parts)
 
     # -- Background prefetch (retaindb-style: queue post-turn, consume next turn-start) --
 
@@ -345,7 +372,11 @@ class VaultProvider(MemoryProvider):
     # -- Step 4 write-back -------------------------------------------------
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        if not self._client or not user_content or not assistant_content:
+        # Either backend (primary super-agent /memory OR secondary obsidian-mind)
+        # is enough to keep the loop running.  This is the post-super-agent
+        # design: super-agent may be intentionally off for cost; obsidian-mind
+        # is the durable source of truth.
+        if (not self._client and not self._mind) or not user_content or not assistant_content:
             return
 
         # Skip writes when the system prompt smells like it contains secrets.
@@ -377,8 +408,23 @@ class VaultProvider(MemoryProvider):
 
         sid = session_id or self._session_id
 
+        # Each successful write registers the entry id so Phase 3 /v1/feedback
+        # can patch it later.  Either source counts — first-wins recording so
+        # we don't overwrite a primary id with a mind id (or vice versa).
+        def _maybe_record(mem_id: str) -> None:
+            with self._last_ingest_lock:
+                if not self._last_ingest_id:
+                    self._last_ingest_id = mem_id
+            try:
+                from .feedback import record_vault_entry
+                record_vault_entry(sid, mem_id)
+            except Exception:
+                pass
+
         # Fire writes to both vault sources in parallel background threads.
         def _write_primary():
+            if not self._client:
+                return
             try:
                 result = self._client.ingest(
                     compacted,
@@ -389,13 +435,7 @@ class VaultProvider(MemoryProvider):
                 if isinstance(result, dict):
                     mem_id = result.get("id") or result.get("memory_id") or (result.get("memory") or {}).get("id")
                     if mem_id:
-                        with self._last_ingest_lock:
-                            self._last_ingest_id = str(mem_id)
-                        try:
-                            from .feedback import record_vault_entry
-                            record_vault_entry(sid, str(mem_id))
-                        except Exception:
-                            pass
+                        _maybe_record(str(mem_id))
             except Exception as exc:
                 logger.debug("vault sync_turn primary write failed: %s", exc)
 
@@ -405,17 +445,46 @@ class VaultProvider(MemoryProvider):
             try:
                 # Brief title so the note shows up usefully in the Obsidian UI.
                 title = (user_safe.strip()[:60] or self._domain) + f" · {self._domain}"
-                self._mind.ingest(
+                result = self._mind.ingest(
                     compacted,
                     tags=["qa", self._domain, "hermes"],
                     title=title,
                     metadata=metadata,
                 )
+                if isinstance(result, dict):
+                    # obsidian-mind's POST /api/notes/:path returns the path
+                    # we wrote to; use that as the stable entry id.
+                    mem_id = (
+                        result.get("path")
+                        or result.get("id")
+                        or (result.get("note") or {}).get("path")
+                        or (result.get("note") or {}).get("id")
+                    )
+                    if mem_id:
+                        _maybe_record(f"mind:{mem_id}")
             except Exception as exc:
                 logger.debug("vault sync_turn mind write failed: %s", exc)
 
         threading.Thread(target=_write_primary, name="vault-write", daemon=True).start()
         threading.Thread(target=_write_mind, name="mind-write", daemon=True).start()
+
+        # Phase 3 — Reflector hook.  Background critique of (Q, A) lands in
+        # vault tag=reflection.  Gated by HERMES_REFLECTOR_ENABLED.
+        try:
+            import os as _os
+            if _os.environ.get("HERMES_REFLECTOR_ENABLED", "true").lower() in ("1", "true", "yes", "on"):
+                from .reflection import reflect_async
+                reflect_async(
+                    session_id=sid,
+                    user_text=user_safe,
+                    assistant_text=asst_safe,
+                    domain=self._domain,
+                    platform=self._platform,
+                    vault_client=self._client,
+                    mind_client=self._mind,
+                )
+        except Exception as _rexc:
+            logger.debug("reflector hook skipped: %s", _rexc)
 
     def last_ingest_id(self) -> Optional[str]:
         with self._last_ingest_lock:
@@ -424,7 +493,7 @@ class VaultProvider(MemoryProvider):
     # -- Tools (explicit recall for power users) ---------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [
+        schemas: List[Dict[str, Any]] = [
             {
                 "name": "vault_search",
                 "description": (
@@ -446,10 +515,20 @@ class VaultProvider(MemoryProvider):
                 },
             },
         ]
+        # Phase 6 — goal_tracker tool schemas (gated by HERMES_GOALS_ENABLED inside).
+        if self._goals is not None:
+            try:
+                schemas.extend(self._goals.tool_schemas())
+            except Exception as exc:
+                logger.debug("goal_tracker tool_schemas failed: %s", exc)
+        return schemas
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         import json as _json
-        if not self._client:
+        # Phase 6 — goal_tracker tools are dispatched first (independent of vault client).
+        if self._goals is not None and tool_name.startswith("goal_"):
+            return self._goals.handle(tool_name, args)
+        if not (self._client or self._mind):
             return _json.dumps({"error": "vault not initialized"})
         if tool_name != "vault_search":
             return _json.dumps({"error": f"unknown tool {tool_name}"})
@@ -460,7 +539,14 @@ class VaultProvider(MemoryProvider):
         domain = args.get("domain") or self._domain
         limit = int(args.get("limit", 8))
 
-        entries = self._client.export(tag=domain, limit=max(limit * 3, 24))
+        # Prefer super-agent /memory when available; fall back to obsidian-mind.
+        if self._client is not None:
+            entries = self._client.export(tag=domain, limit=max(limit * 3, 24))
+        elif self._mind is not None:
+            mind_raw = self._mind.search(query, limit=max(limit * 2, 16))
+            entries = mind_raw if isinstance(mind_raw, list) else []
+        else:
+            return _json.dumps({"results": [], "domain": domain})
         query_tokens = _tokenize(query)
         now = time.time()
         scored = []
