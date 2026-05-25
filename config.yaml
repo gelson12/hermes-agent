@@ -20,16 +20,19 @@ memory:
 # long-tail fallback (see fallback_providers below).
 auxiliary:
   # Planner subtask execution + decomposition: high-volume, cheap, fast.
-  # Groq llama-3.3-70b is ~3x faster than Gemini Flash and free up to ~6k tok/min.
+  # OpenRouter's free Llama-3.3-70b endpoint is typically served by Groq's
+  # LPU backend — ~3x faster than Gemini Flash with no key management.
+  # Hermes doesn't have a native 'groq' provider — we go through OpenRouter
+  # for any free-Llama path.
   planner:
-    provider: groq
-    model: llama-3.3-70b-versatile
+    provider: openrouter
+    model: meta-llama/llama-3.3-70b-instruct:free
 
   # Reflector: structured JSON output, fires every turn — needs fast + reliable.
   # Same model as planner so the resolved client can be cache-shared.
   reflector:
-    provider: groq
-    model: llama-3.3-70b-versatile
+    provider: openrouter
+    model: meta-llama/llama-3.3-70b-instruct:free
 
   # Distiller: writes SKILL.md prose, fires only after successful multi-step
   # runs (low volume).  Gemini Flash keeps the prose register consistent with
@@ -43,13 +46,16 @@ auxiliary:
     provider: gemini
     model: gemini-2.5-pro
 
-# Fallback chain — when a per-task provider rate-limits or 429s, the
-# auxiliary client falls through to these in order before giving up.
-# OpenRouter accepts free-tier model strings like
-# meta-llama/llama-3.3-70b-instruct:free, so this is the long-tail catch.
-fallback_providers:
-  - openrouter
-fallback_model: "meta-llama/llama-3.3-70b-instruct:free"
+# Fallback chain — when an auxiliary call's primary provider rate-limits or
+# errors, the agent falls through to this single fallback before giving up.
+# fallback_model MUST be a dict with provider + model (not a string) per
+# Hermes config schema (see hermes_cli/config.py:3082).  Gemini 2.5 Flash
+# is the universally-available fallback because GEMINI_API_KEY is required
+# for the main agent path anyway.
+fallback_providers: []
+fallback_model:
+  provider: gemini
+  model: gemini-2.5-flash
 
 # Historical Execution Invariant Specification (2026-05-17, relaxed 2026-05-25):
 # - The invariants below were imposed when Hermes was deployed as a strict
