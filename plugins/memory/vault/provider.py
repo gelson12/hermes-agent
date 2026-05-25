@@ -159,7 +159,12 @@ class VaultProvider(MemoryProvider):
     def __init__(self):
         self._client: Optional[VaultClient] = None
         self._mind: Optional[ObsidianMindClient] = None
-        self._goals: Optional[GoalTracker] = None
+        # Phase 6 — GoalTracker is created here (before MemoryManager indexes
+        # tool schemas) but its backends are wired in initialize() once
+        # VAULT_SECRET / OBSIDIAN_MIND_URL are resolved.  This lets the
+        # MemoryManager register the goal_* tool schemas at startup, even
+        # though the backends become available a moment later.
+        self._goals: GoalTracker = GoalTracker(vault_client=None, mind_client=None)
         self._session_id: str = ""
         self._domain: str = "general"
         self._platform: str = ""
@@ -223,12 +228,14 @@ class VaultProvider(MemoryProvider):
         except Exception as exc:
             logger.debug("tool_sentinel register failed: %s", exc)
 
-        # Phase 6 — goal tracker.
+        # Phase 6 — goal tracker: wire backends now that env is resolved.
+        # GoalTracker instance was created in __init__ so schemas are available
+        # at MemoryManager indexing time; we only attach the live backends here.
         try:
-            self._goals = GoalTracker(vault_client=self._client, mind_client=self._mind)
+            self._goals._vault = self._client
+            self._goals._mind = self._mind
         except Exception as exc:
-            logger.debug("goal_tracker init failed: %s", exc)
-            self._goals = None
+            logger.debug("goal_tracker backend wiring failed: %s", exc)
 
         logger.info(
             "vault provider initialized session=%s domain=%s platform=%s mind=%s goals=%s",
@@ -515,18 +522,20 @@ class VaultProvider(MemoryProvider):
                 },
             },
         ]
-        # Phase 6 — goal_tracker tool schemas (gated by HERMES_GOALS_ENABLED inside).
-        if self._goals is not None:
-            try:
-                schemas.extend(self._goals.tool_schemas())
-            except Exception as exc:
-                logger.debug("goal_tracker tool_schemas failed: %s", exc)
+        # Phase 6 — goal_tracker tool schemas (always created in __init__,
+        # gated by HERMES_GOALS_ENABLED env var inside tool_schemas()).
+        try:
+            schemas.extend(self._goals.tool_schemas())
+        except Exception as exc:
+            logger.debug("goal_tracker tool_schemas failed: %s", exc)
         return schemas
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         import json as _json
-        # Phase 6 — goal_tracker tools are dispatched first (independent of vault client).
-        if self._goals is not None and tool_name.startswith("goal_"):
+        # Phase 6 — goal_tracker tools dispatched first.  Backends may be None
+        # if VAULT_SECRET and OBSIDIAN_MIND_URL are both unset; GoalTracker
+        # handlers return an error string in that case rather than raising.
+        if tool_name.startswith("goal_"):
             return self._goals.handle(tool_name, args)
         if not (self._client or self._mind):
             return _json.dumps({"error": "vault not initialized"})
