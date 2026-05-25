@@ -74,6 +74,28 @@ class ObsidianMindClient:
         self._ingest_field = ingest_field
         self._client = httpx.Client(timeout=timeout)
 
+    def read_note(self, path: str) -> Optional[str]:
+        """GET /api/notes/<path> — read raw note content. Returns text or None."""
+        if not path:
+            return None
+        try:
+            resp = self._client.get(
+                f"{self._base_url}/api/notes/{path.lstrip('/')}",
+                headers=self._headers,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            if isinstance(payload, dict):
+                for k in ("content", "text", "body"):
+                    v = payload.get(k)
+                    if isinstance(v, str):
+                        return v
+            if isinstance(payload, str):
+                return payload
+        except Exception as exc:
+            logger.debug("obsidian-mind read_note failed (%s): %s", path, exc)
+        return None
+
     def search(self, query: str, limit: int = 8) -> List[Dict[str, Any]]:
         if not query:
             return []

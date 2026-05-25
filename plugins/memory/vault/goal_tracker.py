@@ -129,6 +129,37 @@ def _format_goal_content(goal: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+_GOAL_HEADER_RE = re.compile(r"^GOAL\s+\[([a-f0-9]+)\]\s+(\w+)\s*$", re.MULTILINE | re.IGNORECASE)
+_GOAL_FIELD_RE = re.compile(r"^(text|priority|created|due):\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE)
+
+
+def _parse_goal_content(content: str) -> Optional[Dict[str, Any]]:
+    """Reverse of _format_goal_content: parse a goal note body back into a dict.
+
+    Returns None if the content doesn't look like a goal record.
+    """
+    if not content or "GOAL [" not in content:
+        return None
+    header = _GOAL_HEADER_RE.search(content)
+    if not header:
+        return None
+    goal: Dict[str, Any] = {
+        "id": header.group(1).strip(),
+        "status": header.group(2).strip().lower(),
+        "notes": [],
+    }
+    for field_match in _GOAL_FIELD_RE.finditer(content):
+        key = field_match.group(1).lower()
+        value = field_match.group(2).strip()
+        if key == "created":
+            goal["created_at"] = value
+        else:
+            goal[key] = value
+    goal.setdefault("text", "")
+    goal.setdefault("priority", "normal")
+    return goal
+
+
 # ---------------------------------------------------------------------------
 # Public class
 # ---------------------------------------------------------------------------
@@ -287,14 +318,24 @@ class GoalTracker:
     # -- Fetch -----------------------------------------------------------
 
     def _fetch_all(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Pull goal entries from vault, reconstruct from metadata."""
+        """Pull goal entries from vault, reconstruct from content text.
+
+        Obsidian-mind's /api/search returns only {path, matches} (no metadata),
+        so we search for the `GOAL [` prefix marker, then GET each matching
+        note and parse the structured content body.  Super-agent /memory does
+        return metadata, so we read goal_data from there directly when
+        available.
+        """
         entries: List[Dict[str, Any]] = []
-        # Prefer obsidian-mind (newer/canonical going forward); fall back to vault.
+        # Prefer obsidian-mind (newer/canonical); fall back to super-agent.
         for backend in (self._mind, self._vault):
             if backend is None:
                 continue
             try:
-                raw = backend.search(query="goal", limit=limit) if hasattr(backend, "search") else backend.export(tag="goal", limit=limit)
+                if hasattr(backend, "search"):
+                    raw = backend.search(query="GOAL [", limit=limit)
+                else:
+                    raw = backend.export(tag="goal", limit=limit)
             except Exception as exc:
                 logger.debug("goal_tracker fetch failed (backend %s): %s", type(backend).__name__, exc)
                 continue
@@ -305,10 +346,24 @@ class GoalTracker:
             for item in raw:
                 if not isinstance(item, dict):
                     continue
+                # Path 1: super-agent returns metadata directly.
                 meta = item.get("metadata") or {}
                 data = meta.get("goal_data")
                 if isinstance(data, dict) and data.get("id"):
                     entries.append(data)
+                    continue
+                # Path 2: obsidian-mind search hits — fetch the note content
+                # and parse it.  Skip if the matches snippet doesn't include
+                # the GOAL prefix (false positive on the substring search).
+                path = item.get("path")
+                matches = item.get("matches") or []
+                if not path or not any("GOAL [" in str(m) for m in matches):
+                    continue
+                if hasattr(backend, "read_note"):
+                    content = backend.read_note(path)
+                    parsed = _parse_goal_content(content) if content else None
+                    if parsed:
+                        entries.append(parsed)
             if entries:
                 break
         # Latest version per id wins (newer overrides older).
