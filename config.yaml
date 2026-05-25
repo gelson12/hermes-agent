@@ -10,13 +10,46 @@ model:
 memory:
   provider: "vault"
 
-# Default model is Gemini Flash (cheap, fast).  Agentic layers (planner,
-# reflector, distiller, prompt-evolver) may route specific subtasks to
-# other models via the VAULT_ROUTE_*_MODEL env vars when
-# HERMES_VAULT_ROUTING_ENABLED=true.  Routing is OPT-IN via env, so this
-# config alone keeps the deployment Gemini-only.
-fallback_providers: []
-fallback_model: null
+# Auxiliary task routing — per-task provider/model overrides for the
+# agentic layers shipped in the Tier 1+2 upgrade (planner, reflector,
+# distiller, prompt_evolver).  Read by `auxiliary_client._resolve_task_provider_model`
+# at call time.  Main user-facing chat still uses the model.default above
+# (Gemini Flash); this section only affects the behind-the-scenes layers.
+#
+# Direct providers (Groq, Gemini) for high-volume tasks; OpenRouter as the
+# long-tail fallback (see fallback_providers below).
+auxiliary:
+  # Planner subtask execution + decomposition: high-volume, cheap, fast.
+  # Groq llama-3.3-70b is ~3x faster than Gemini Flash and free up to ~6k tok/min.
+  planner:
+    provider: groq
+    model: llama-3.3-70b-versatile
+
+  # Reflector: structured JSON output, fires every turn — needs fast + reliable.
+  # Same model as planner so the resolved client can be cache-shared.
+  reflector:
+    provider: groq
+    model: llama-3.3-70b-versatile
+
+  # Distiller: writes SKILL.md prose, fires only after successful multi-step
+  # runs (low volume).  Gemini Flash keeps the prose register consistent with
+  # the rest of the system.
+  distiller:
+    provider: gemini
+    model: gemini-2.5-flash
+
+  # Prompt evolver: rare, important — wants the best reasoning available.
+  prompt_evolver:
+    provider: gemini
+    model: gemini-2.5-pro
+
+# Fallback chain — when a per-task provider rate-limits or 429s, the
+# auxiliary client falls through to these in order before giving up.
+# OpenRouter accepts free-tier model strings like
+# meta-llama/llama-3.3-70b-instruct:free, so this is the long-tail catch.
+fallback_providers:
+  - openrouter
+fallback_model: "meta-llama/llama-3.3-70b-instruct:free"
 
 # Historical Execution Invariant Specification (2026-05-17, relaxed 2026-05-25):
 # - The invariants below were imposed when Hermes was deployed as a strict
