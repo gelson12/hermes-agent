@@ -1006,6 +1006,17 @@ class APIServerAdapter(BasePlatformAdapter):
 
         stream = body.get("stream", False)
 
+        # ── Tool-calling passthrough ──────────────────────────────────────
+        # Hermes's agent loop executes its OWN tools server-side and cannot
+        # return OpenAI `tool_calls`. When a caller supplies `tools` (e.g. the
+        # Avengers voice worker's hand-off / enrollment functions), proxy the
+        # request straight to Google's OpenAI-compatible Gemini endpoint, which
+        # natively supports function-calling + streaming. ISOLATED: only fires
+        # when `tools` is present, so every non-tool request keeps the agent
+        # path unchanged (zero blast radius for the rest of the swarm).
+        if isinstance(body.get("tools"), list) and body.get("tools"):
+            return await self._handle_toolcalling_passthrough(request, body)
+
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         system_prompt = None
         conversation_messages: List[Dict[str, str]] = []
@@ -1437,6 +1448,81 @@ class APIServerAdapter(BasePlatformAdapter):
                 response_headers["X-Hermes-Error"] = err_msg[:200]
 
         return web.json_response(response_data, headers=response_headers)
+
+    async def _handle_toolcalling_passthrough(self, request: "web.Request", body: dict) -> "web.Response":
+        """Proxy a tool-bearing chat completion to Gemini's OpenAI-compatible
+        endpoint (native function-calling). Raw SSE bytes are forwarded for
+        streaming, so no serialization of tool_calls is needed. Only reached
+        when the caller sent `tools` — all other traffic is unaffected."""
+        import os
+        import httpx
+
+        api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+        if not api_key:
+            return web.json_response(
+                _openai_error("Tool-calling passthrough needs GEMINI_API_KEY/GOOGLE_API_KEY", err_type="server_error"),
+                status=500,
+            )
+
+        upstream = dict(body)
+        # Map any non-Gemini model alias (e.g. "hermes-agent") to a real model.
+        if "gemini" not in str(body.get("model") or "").lower():
+            upstream["model"] = os.environ.get("TOOLCALL_MODEL", "gemini-2.5-flash")
+
+        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        timeout = httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=30.0)
+        is_stream = bool(body.get("stream"))
+        logger.info("toolcall-passthrough: model=%s stream=%s tools=%d",
+                    upstream.get("model"), is_stream, len(body.get("tools") or []))
+
+        if not is_stream:
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    r = await client.post(url, json=upstream, headers=headers)
+                return web.json_response(json.loads(r.text), status=r.status_code)
+            except Exception as e:  # noqa: BLE001
+                logger.error("toolcall-passthrough (non-stream) failed: %s", e)
+                return web.json_response(
+                    _openai_error(f"tool-calling passthrough error: {e}", err_type="server_error"),
+                    status=502,
+                )
+
+        sse_headers = {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+        origin = request.headers.get("Origin", "")
+        cors = self._cors_headers_for_origin(origin) if origin else None
+        if cors:
+            sse_headers.update(cors)
+        response = web.StreamResponse(status=200, headers=sse_headers)
+        await response.prepare(request)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", url, json=upstream, headers=headers) as up:
+                    if up.status_code != 200:
+                        err = (await up.aread()).decode("utf-8", "replace")[:500]
+                        await response.write(
+                            f"data: {json.dumps({'error': {'message': err, 'type': 'server_error'}})}\n\n".encode()
+                        )
+                        await response.write(b"data: [DONE]\n\n")
+                        return response
+                    # Forward the upstream SSE bytes verbatim (already OpenAI shape).
+                    async for chunk in up.aiter_bytes():
+                        if chunk:
+                            await response.write(chunk)
+        except Exception as e:  # noqa: BLE001
+            logger.error("toolcall-passthrough (stream) failed: %s", e)
+            try:
+                await response.write(
+                    f"data: {json.dumps({'error': {'message': str(e), 'type': 'server_error'}})}\n\n".encode()
+                )
+                await response.write(b"data: [DONE]\n\n")
+            except Exception:  # noqa: BLE001
+                pass
+        return response
 
     async def _write_sse_chat_completion(
         self, request: "web.Request", completion_id: str, model: str,
