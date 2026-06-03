@@ -306,12 +306,31 @@ class VaultProvider(MemoryProvider):
         for t in threads:
             t.join(timeout=3.5)
 
-        if not primary_entries and not mind_entries:
+        composed = self._compose_recall(query, primary_entries, mind_entries)
+        if not composed:
             return
+        context, top_pair = composed
+        with self._lock:
+            self._pending_context = context
+            self._pending_top = top_pair
 
+    def _compose_recall(
+        self,
+        query: str,
+        primary_entries: List[Dict[str, Any]],
+        mind_entries: List[Dict[str, Any]],
+    ) -> Optional[Tuple[str, Tuple[float, Dict[str, Any]]]]:
+        """Score + render recall context from either backend.
+
+        Returns ``(context_text, (top_score, top_entry))`` or ``None`` when
+        nothing scores. Shared by the background prefetch AND the synchronous
+        cold-start fallback in ``prefetch`` so both render identically.
+        """
+        if not primary_entries and not mind_entries:
+            return None
         query_tokens = _tokenize(query)
         if not query_tokens:
-            return
+            return None
 
         now = time.time()
         scored: List[Tuple[float, Dict[str, Any]]] = []
@@ -335,7 +354,7 @@ class VaultProvider(MemoryProvider):
                 e.setdefault("source", "obsidian-mind")
                 scored.append((score, e))
         if not scored:
-            return
+            return None
         scored.sort(key=lambda p: p[0], reverse=True)
         top = scored[: 3]
         top_score, top_entry = top[0]
@@ -345,18 +364,34 @@ class VaultProvider(MemoryProvider):
             origin = "mind" if e.get("source") == "obsidian-mind" else "qa"
             snippet = _entry_text(e)[:480].replace("\n", " ")
             lines.append(f"- ({origin} score {score:.2f}) {snippet}")
-        context = "\n".join(lines)
-
-        with self._lock:
-            self._pending_context = context
-            self._pending_top = (top_score, top_entry)
+        return "\n".join(lines), (top_score, top_entry)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         with self._lock:
             ctx = self._pending_context
             self._pending_context = ""
             # Note: keep self._pending_top so vault_router can read confidence after prefetch.
-        return ctx
+        if ctx:
+            return ctx
+        # COLD-START fallback: no primed context (e.g. the FIRST turn of a fresh
+        # session). The background prefetch only lands on the NEXT turn, so
+        # without this a cross-session question on turn 1 recalls nothing — the
+        # observed "I don't have that saved" miss. Do a bounded, fail-soft
+        # SYNCHRONOUS obsidian-mind recall so cold cross-session recall is
+        # reliable. We hit obsidian-mind directly (NOT the historical super-agent
+        # "primary", which is cost-off/down) so there's no dead-backend wait.
+        if self._mind and query:
+            try:
+                mind_entries = self._mind.search(query, limit=8)
+                composed = self._compose_recall(query, [], mind_entries)
+                if composed:
+                    context, top_pair = composed
+                    with self._lock:
+                        self._pending_top = top_pair
+                    return context
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("sync cold recall failed: %s", exc)
+        return ""
 
     # -- Step 2 routing read-side ------------------------------------------
 
