@@ -493,6 +493,21 @@ class VaultProvider(MemoryProvider):
         except Exception as _rexc:
             logger.debug("reflector hook skipped: %s", _rexc)
 
+        # Phase 4 (voice) — background skill distiller. Decoupled from the planner
+        # so STREAMING voice turns also learn reusable skills. Spawns its own daemon
+        # thread AFTER the response, so it adds ZERO latency to the turn. Gated by
+        # HERMES_DISTILLER_ENABLED + a procedural-answer check (chit-chat/refusals
+        # never qualify).
+        try:
+            import os as _os2
+            if _os2.environ.get("HERMES_DISTILLER_ENABLED", "true").lower() in ("1", "true", "yes", "on"):
+                from .distiller import should_distill_turn, distill_turn_async
+                if should_distill_turn(user_safe, asst_safe):
+                    distill_turn_async(user_safe, asst_safe,
+                                       domain=self._domain, mind_client=self._mind)
+        except Exception as _dexc:
+            logger.debug("voice distiller hook skipped: %s", _dexc)
+
     def last_ingest_id(self) -> Optional[str]:
         with self._last_ingest_lock:
             return self._last_ingest_id

@@ -234,3 +234,138 @@ def _do_distill(query: str, plan: List[Dict[str, Any]],
         )
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Voice (turn-based) distiller — Phase 4 for the STREAMING path
+# ---------------------------------------------------------------------------
+#
+# The planner-based distiller above only fires after a non-streaming planner run,
+# so STREAMING voice turns never learn skills. This variant runs from the per-turn
+# background hook (VaultProvider.sync_turn) — fully decoupled from the planner and
+# fired in its own daemon thread AFTER the response is already streaming, so it adds
+# ZERO latency to the voice turn. It distills a single (request, step-by-step answer)
+# exchange into a reusable SKILL.md and ingests it to the vault so future turns can
+# recall it.
+
+# Procedural-answer signals: numbered steps, ordered-flow words, or a bullet list.
+_STEP_RE = re.compile(r"(^|\n)\s*\d+[.)]\s", re.MULTILINE)
+_BULLET_RE = re.compile(r"(^|\n)\s*[-*]\s+\S", re.MULTILINE)
+_FLOW_RE = re.compile(r"\b(first|then|next|after that|afterwards|finally|step\s+\d)\b", re.I)
+# Refusals / non-answers we must never distill into a "skill".
+_REFUSAL_RE = re.compile(
+    r"^\s*(i'?m\s+(not\s+able|afraid|unable)|i\s+(can'?t|cannot|don'?t\s+have)|"
+    r"as\s+an\s+ai|i\s+couldn'?t\s+find|sorry)", re.I,
+)
+
+
+def should_distill_turn(user_text: str, assistant_text: str) -> bool:
+    """Gate a single voice turn for skill distillation.
+
+    Only substantive, PROCEDURAL answers qualify — so chit-chat ("Good evening,
+    sir") and refusals never become skills. Cheap pure check (no LLM); the aux
+    call is only spent once this passes.
+    """
+    if os.environ.get("HERMES_DISTILLER_ENABLED", "true").lower() not in ("1", "true", "yes", "on"):
+        return False
+    a = (assistant_text or "").strip()
+    if len(a) < 140:                      # too short to hold a reusable procedure
+        return False
+    if _REFUSAL_RE.search(a):
+        return False
+    flow_hits = len(_FLOW_RE.findall(a))
+    procedural = bool(_STEP_RE.search(a)) or bool(_BULLET_RE.search(a)) or flow_hits >= 2
+    return procedural
+
+
+_DISTILL_TURN_SYSTEM = (
+    "You are a skill author. You are given a user's request and the assistant's "
+    "step-by-step answer from a SINGLE voice turn. If — and only if — it captures a "
+    "REUSABLE procedure worth remembering for next time, write a reusable SKILL.md. "
+    "If it is trivial, conversational, or one-off with no reusable procedure, reply "
+    "with exactly: SKIP\n\n"
+    "When you do write a skill, format STRICTLY:\n"
+    "---\n"
+    "name: <slug, lowercase-with-dashes, <=40 chars>\n"
+    "description: <one sentence describing when to use this skill, <=200 chars>\n"
+    "version: 1.0.0-auto\n"
+    "platforms: all\n"
+    "tags: [auto, voice, <1-2 topic tags>]\n"
+    "---\n\n"
+    "# <Title>\n\n"
+    "<Short intro: when to use this skill (1-2 sentences).>\n\n"
+    "## Procedure\n\n"
+    "1. <step one>\n"
+    "2. <step two>\n"
+    "...\n\n"
+    "## Notes\n\n"
+    "<Key gotchas or prerequisites.>\n\n"
+    "Be concrete. Do not invent steps that weren't in the answer. Return the SKILL.md "
+    "content only (no fences/preamble), or exactly SKIP."
+)
+
+
+def distill_turn_async(user_text: str, assistant_text: str, *,
+                       domain: str = "voice", mind_client: Any = None) -> None:
+    """Fire-and-forget skill distillation for one voice turn (zero added latency)."""
+    thread = threading.Thread(
+        target=_do_distill_turn,
+        args=(user_text, assistant_text, domain, mind_client),
+        name="hermes-distiller-voice",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _do_distill_turn(user_text: str, assistant_text: str, domain: str,
+                     mind_client: Any = None) -> None:
+    user_prompt = (
+        f"USER REQUEST:\n{(user_text or '').strip()[:1000]}\n\n"
+        f"ASSISTANT ANSWER (step-by-step):\n{(assistant_text or '').strip()[:2400]}\n\n"
+        "Write the SKILL.md, or reply SKIP."
+    )
+    raw = _aux_call(system=_DISTILL_TURN_SYSTEM, user=user_prompt,
+                    max_tokens=1200, temperature=0.3)
+    if not raw or raw.strip().upper().startswith("SKIP") or not raw.lstrip().startswith("---"):
+        logger.debug("voice distiller: skipped (no reusable procedure)")
+        return
+
+    name_match = re.search(r"^name:\s*([a-z0-9-]+)", raw, re.MULTILINE)
+    slug = _kebab(name_match.group(1)) if name_match else _kebab(" ".join((user_text or "").split()[:6]))
+
+    skills_dir = _skills_root() / slug
+    try:
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        skill_path = skills_dir / "SKILL.md"
+        if skill_path.exists():
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            skills_dir = _skills_root() / f"{slug}-{stamp}"
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            skill_path = skills_dir / "SKILL.md"
+        skill_path.write_text(raw, encoding="utf-8")
+        logger.info("hermes.distiller.voice.created path=%s slug=%s", skill_path, slug)
+        import json as _json
+        (skills_dir / ".metadata.json").write_text(
+            _json.dumps({
+                "origin": "auto-distiller-voice",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "source_query": (user_text or "")[:600],
+                "domain": domain,
+            }, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("voice distiller: skill write failed: %s", exc)
+
+    # Ingest into the vault tagged `skill` so future turns can RECALL it through
+    # the normal memory loop (best-effort; never raises).
+    if mind_client is not None:
+        try:
+            mind_client.ingest(
+                raw,
+                tags=["skill", domain, "hermes"],
+                title=slug,
+                source="hermes-voice-distiller",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("voice distiller: vault ingest failed: %s", exc)
