@@ -364,11 +364,14 @@ TOOLSETS = {
             "cronjob",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+            # Email across the user's mailboxes (gated on creds via check_fn).
+            # email_send/email_trash mutate -> should be gated behind approval.
+            "email_search", "email_send", "email_trash",
 
         ],
         "includes": []
     },
-    
+
     "hermes-cli": {
         "description": "Full interactive CLI toolset - all default tools plus cronjob management",
         "tools": _HERMES_CORE_TOOLS,
