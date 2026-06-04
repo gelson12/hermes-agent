@@ -77,6 +77,7 @@ CONFIGURABLE_TOOLSETS = [
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
     ("computer_use",     "🖱️  Computer Use (macOS)",     "background desktop control via cua-driver"),
+    ("email-remote",     "📧 Email (Gmail/Outlook)",     "search, send, trash across the user's mailboxes"),
 ]
 
 # Toolsets that are OFF by default for new installs.
