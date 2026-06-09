@@ -52,10 +52,17 @@ auxiliary:
 # Hermes config schema (see hermes_cli/config.py:3082).  Gemini 2.5 Flash
 # is the universally-available fallback because GEMINI_API_KEY is required
 # for the main agent path anyway.
-fallback_providers: []
+# DeepSeek is the resilient fallback: when Gemini struggles (e.g. the 403
+# PERMISSION_DENIED after a billing suspension) the agent falls through to
+# DeepSeek-chat — native provider, DEEPSEEK_API_KEY already set, reasoning on par
+# with Gemini-Flash, and cheap. Gemini stays PRIMARY (model.provider above), so the
+# moment Gemini billing is restored it leads again with DeepSeek as the safety net.
+fallback_providers:
+  - provider: deepseek
+    model: deepseek-chat
 fallback_model:
-  provider: gemini
-  model: gemini-2.5-flash
+  provider: deepseek
+  model: deepseek-chat
 
 # Historical Execution Invariant Specification (2026-05-17, relaxed 2026-05-25):
 # - The invariants below were imposed when Hermes was deployed as a strict
