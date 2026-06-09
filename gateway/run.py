@@ -699,38 +699,39 @@ def _resolve_runtime_agent_kwargs() -> dict:
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
-    # HARD ENFORCEMENT: Jarvis Execution Invariant Specification (INV-04, INV-09)
-    # System MUST use Gemini only. No OpenRouter, OpenAI, or Anthropic.
+    # Jarvis Execution Invariant Specification (INV-03/04/09) — Gemini-only lock.
+    # RELAXED 2026-06-09: Google suspended the Gemini project (403 PERMISSION_DENIED after
+    # a billing failure), so the strict single-path lock would crash the whole brain. The
+    # checks are now opt-in via HERMES_ENFORCE_GEMINI_ONLY=1; by default Hermes honours the
+    # provider configured in config.yaml (e.g. DeepSeek), so it stays alive without Gemini.
     resolved_provider = runtime.get("provider", "").strip().lower()
     resolved_endpoint = runtime.get("base_url", "").strip().lower()
 
-    # CRITICAL: Check for environment variable pollution that overrides config.yaml
-    if os.getenv("OPENROUTER_API_KEY"):
-        raise RuntimeError(
-            f"FATAL: Environment Variable Violation (INV-09)\n"
-            f"OPENROUTER_API_KEY is set in Railway environment.\n"
-            f"This overrides config.yaml and forces provider='openrouter'.\n"
-            f"SOLUTION: Remove OPENROUTER_API_KEY from Railway → hermes-agent → Variables\n"
-            f"Hermes MUST use ONLY Gemini API. No OpenRouter allowed."
-        )
-
-    if resolved_provider not in ("gemini", "google", "google-gemini"):
-        raise RuntimeError(
-            f"FATAL: Execution Invariant Violation (INV-04)\n"
-            f"Expected provider to be Google/Gemini, got provider='{resolved_provider}'\n"
-            f"Hermes is configured to use ONLY Gemini API (via Google provider).\n"
-            f"OpenRouter, OpenAI, Anthropic, and other providers are forbidden.\n"
-            f"Check config.yaml: model.provider must be 'google' or 'gemini'\n"
-            f"Or check Railway environment variables for API key overrides."
-        )
-
-    if "generativelanguage.googleapis.com" not in resolved_endpoint:
-        raise RuntimeError(
-            f"FATAL: Execution Invariant Violation (INV-03)\n"
-            f"Expected endpoint to contain 'generativelanguage.googleapis.com'\n"
-            f"Got endpoint='{resolved_endpoint}'\n"
-            f"Hermes LLM calls must go to Google Gemini API only."
-        )
+    if os.getenv("HERMES_ENFORCE_GEMINI_ONLY"):
+        if os.getenv("OPENROUTER_API_KEY"):
+            raise RuntimeError(
+                f"FATAL: Environment Variable Violation (INV-09)\n"
+                f"OPENROUTER_API_KEY is set in Railway environment.\n"
+                f"This overrides config.yaml and forces provider='openrouter'.\n"
+                f"SOLUTION: Remove OPENROUTER_API_KEY from Railway → hermes-agent → Variables\n"
+                f"Hermes MUST use ONLY Gemini API. No OpenRouter allowed."
+            )
+        if resolved_provider not in ("gemini", "google", "google-gemini"):
+            raise RuntimeError(
+                f"FATAL: Execution Invariant Violation (INV-04)\n"
+                f"Expected provider to be Google/Gemini, got provider='{resolved_provider}'\n"
+                f"Hermes is configured to use ONLY Gemini API (via Google provider)."
+            )
+        if "generativelanguage.googleapis.com" not in resolved_endpoint:
+            raise RuntimeError(
+                f"FATAL: Execution Invariant Violation (INV-03)\n"
+                f"Expected endpoint to contain 'generativelanguage.googleapis.com'\n"
+                f"Got endpoint='{resolved_endpoint}'\n"
+                f"Hermes LLM calls must go to Google Gemini API only."
+            )
+    elif resolved_provider not in ("gemini", "google", "google-gemini"):
+        print(f"[hermes] INV relaxed — running on non-Gemini provider '{resolved_provider}' "
+              f"(Gemini billing suspended). Set HERMES_ENFORCE_GEMINI_ONLY=1 to restore the lock.")
 
     return {
         "api_key": runtime.get("api_key"),
