@@ -1,11 +1,11 @@
 model:
-  # DeepSeek is PRIMARY while Gemini's billing is suspended (Gemini returns 403
-  # PERMISSION_DENIED). deepseek-chat is native, funded, fast, and reasons on par with
-  # Gemini-Flash, so the main /v1/chat/completions endpoint works directly. Flip
-  # provider back to "gemini" once Google billing is restored (gemini is the fallback
-  # below, so it'll already be exercised).
-  default: "deepseek-chat"
-  provider: "deepseek"
+  # Gemini PRIMARY (fast + free tier). When Gemini is unavailable (e.g. the current
+  # billing suspension -> 403), the fallback chain below takes over (Haiku -> DeepSeek)
+  # so the brain stays alive, and Gemini auto-resumes as primary the moment its billing
+  # is restored. INV-03/04/09 Gemini-only lock is relaxed (HERMES_ENFORCE_GEMINI_ONLY=1
+  # to re-impose it).
+  default: "gemini-2.5-flash"
+  provider: "gemini"
 
 # Vault memory provider (Obsidian Vault on Railway) — activates the
 # self-improvement loop: cross-session recall before each turn + Q+A
@@ -62,16 +62,18 @@ auxiliary:
 # DeepSeek-chat — native provider, DEEPSEEK_API_KEY already set, reasoning on par
 # with Gemini-Flash, and cheap. Gemini stays PRIMARY (model.provider above), so the
 # moment Gemini billing is restored it leads again with DeepSeek as the safety net.
-# DeepSeek (primary above) -> Gemini fallback. OpenRouter is NOT usable: setting
-# OPENROUTER_API_KEY trips Hermes's INV-09 invariant and fatally crashes the brain, so
-# that key must stay OUT of the hermes-agent environment. Gemini leads again once its
-# billing is restored (just flip provider back to gemini above).
+# Fallback chain: Gemini (primary above) -> Haiku 4.5 -> DeepSeek. Whichever provider is
+# reachable answers, so a single outage never mutes the brain. fallback_model = DeepSeek
+# keeps the auxiliary layers (planner/reflector/distiller/prompt-evolver) working when
+# THEIR own provider errors, so Hermes's full agentic functionality is preserved.
 fallback_providers:
-  - provider: gemini
-    model: gemini-2.5-flash
+  - provider: anthropic
+    model: claude-haiku-4-5-20251001
+  - provider: deepseek
+    model: deepseek-chat
 fallback_model:
-  provider: gemini
-  model: gemini-2.5-flash
+  provider: deepseek
+  model: deepseek-chat
 
 # Historical Execution Invariant Specification (2026-05-17, relaxed 2026-05-25):
 # - The invariants below were imposed when Hermes was deployed as a strict
