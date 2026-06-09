@@ -24,32 +24,27 @@ memory:
 # Direct providers (Groq, Gemini) for high-volume tasks; OpenRouter as the
 # long-tail fallback (see fallback_providers below).
 auxiliary:
-  # Planner subtask execution + decomposition: high-volume, cheap, fast.
-  # OpenRouter's free Llama-3.3-70b endpoint is typically served by Groq's
-  # LPU backend — ~3x faster than Gemini Flash with no key management.
-  # Hermes doesn't have a native 'groq' provider — we go through OpenRouter
-  # for any free-Llama path.
+  # ALL agentic layers run on DeepSeek so Hermes's FULL functionality works on the funded
+  # provider regardless of Gemini's state — no Google bank-card dependency. DeepSeek is
+  # native + funded. If Gemini is later the MAIN chat, these stay on DeepSeek (reliable,
+  # cheap). This is what makes "all Hermes features work" without Gemini.
   planner:
-    provider: openrouter
-    model: meta-llama/llama-3.3-70b-instruct:free
+    provider: deepseek
+    model: deepseek-chat
 
-  # Reflector: structured JSON output, fires every turn — needs fast + reliable.
-  # Same model as planner so the resolved client can be cache-shared.
   reflector:
-    provider: openrouter
-    model: meta-llama/llama-3.3-70b-instruct:free
+    provider: deepseek
+    model: deepseek-chat
 
-  # Distiller: writes SKILL.md prose, fires only after successful multi-step
-  # runs (low volume).  Gemini Flash keeps the prose register consistent with
-  # the rest of the system.
   distiller:
-    provider: gemini
-    model: gemini-2.5-flash
+    provider: deepseek
+    model: deepseek-chat
 
-  # Prompt evolver: rare, important — wants the best reasoning available.
+  # Prompt evolver: rare, never on the voice hot path. deepseek-chat keeps it on one funded
+  # provider (use deepseek-reasoner here if you want stronger reasoning + don't mind slower).
   prompt_evolver:
-    provider: gemini
-    model: gemini-2.5-pro
+    provider: deepseek
+    model: deepseek-chat
 
 # Fallback chain — when an auxiliary call's primary provider rate-limits or
 # errors, the agent falls through to this single fallback before giving up.
