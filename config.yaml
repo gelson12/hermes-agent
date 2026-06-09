@@ -1,6 +1,11 @@
 model:
-  default: "gemini-2.5-flash"
-  provider: "gemini"
+  # DeepSeek is PRIMARY while Gemini's billing is suspended (Gemini returns 403
+  # PERMISSION_DENIED). deepseek-chat is native, funded, fast, and reasons on par with
+  # Gemini-Flash, so the main /v1/chat/completions endpoint works directly. Flip
+  # provider back to "gemini" once Google billing is restored (gemini is the fallback
+  # below, so it'll already be exercised).
+  default: "deepseek-chat"
+  provider: "deepseek"
 
 # Vault memory provider (Obsidian Vault on Railway) — activates the
 # self-improvement loop: cross-session recall before each turn + Q+A
@@ -57,12 +62,16 @@ auxiliary:
 # DeepSeek-chat — native provider, DEEPSEEK_API_KEY already set, reasoning on par
 # with Gemini-Flash, and cheap. Gemini stays PRIMARY (model.provider above), so the
 # moment Gemini billing is restored it leads again with DeepSeek as the safety net.
+# Resilient fallback chain: DeepSeek (primary above) -> OpenRouter free Llama-3.3-70B
+# (genuinely FREE, good reasoning) -> Gemini (for when Google billing is restored).
 fallback_providers:
-  - provider: deepseek
-    model: deepseek-chat
+  - provider: openrouter
+    model: meta-llama/llama-3.3-70b-instruct:free
+  - provider: gemini
+    model: gemini-2.5-flash
 fallback_model:
-  provider: deepseek
-  model: deepseek-chat
+  provider: openrouter
+  model: meta-llama/llama-3.3-70b-instruct:free
 
 # Historical Execution Invariant Specification (2026-05-17, relaxed 2026-05-25):
 # - The invariants below were imposed when Hermes was deployed as a strict
