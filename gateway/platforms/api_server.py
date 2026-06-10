@@ -1011,14 +1011,22 @@ class APIServerAdapter(BasePlatformAdapter):
                 {"error": {"message": f"unknown provider '{raw}' (use gemini|anthropic|deepseek)",
                            "type": "invalid_request_error"}}, status=400)
         model = str(body.get("model", "")).strip() or model_map[canon]
-        # Confirm the target's credentials resolve (catches a wholly-unconfigured provider).
+        # PRE-FLIGHT: resolve + DIRECTLY test-call the target (bypassing the fallback chain,
+        # so a dead PRIMARY is caught — a normal completion would silently fall back to
+        # another provider and mask it). Commit the switch ONLY if the target itself answers,
+        # so a switch can never mute or silently mislead the brain.
         try:
             from hermes_cli.runtime_provider import resolve_runtime_provider
-            resolve_runtime_provider(requested=canon)
+            rt = resolve_runtime_provider(requested=canon)
         except Exception as exc:  # noqa: BLE001
             return web.json_response(
                 {"error": {"message": f"provider '{canon}' not configured: {str(exc)[:160]}",
                            "type": "provider_unavailable", "code": "creds_unresolved"}}, status=400)
+        ok, detail = await self._preflight_target(canon, model, rt)
+        if not ok:
+            return web.json_response(
+                {"error": {"message": f"provider '{canon}' is not reachable: {detail}",
+                           "type": "provider_unavailable", "code": "preflight_failed"}}, status=502)
         previous = os.environ.get("HERMES_INFERENCE_PROVIDER", "")
         os.environ["HERMES_INFERENCE_PROVIDER"] = canon
         os.environ["HERMES_INFERENCE_MODEL"] = model
@@ -1026,6 +1034,36 @@ class APIServerAdapter(BasePlatformAdapter):
                        canon, model, previous or "(config default)")
         return web.json_response({"ok": True, "provider": canon, "model": model,
                                   "previous": previous})
+
+    async def _preflight_target(self, provider: str, model: str, rt: dict) -> tuple:
+        """Direct 1-token test-call to the target provider (NOT via the fallback chain) to
+        confirm it actually answers before we make it primary. Returns (ok, detail). A wrong
+        base_url errs SAFE (returns False → refuse the switch) rather than risking a switch to
+        a dead provider."""
+        import aiohttp
+        base = (rt.get("base_url") or "").rstrip("/")
+        key = rt.get("api_key") or ""
+        api_mode = rt.get("api_mode") or "chat_completions"
+        if not base:
+            return False, "no base_url resolved"
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            if api_mode == "anthropic_messages":
+                url = base + "/v1/messages"
+                headers = {"x-api-key": key, "anthropic-version": "2023-06-01",
+                           "content-type": "application/json"}
+            else:
+                url = base + "/chat/completions"
+                headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            body = {"model": model, "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}]}
+            async with aiohttp.ClientSession(timeout=timeout) as s:
+                async with s.post(url, json=body, headers=headers) as r:
+                    if r.status < 300:
+                        return True, "ok"
+                    return False, f"HTTP {r.status}: {(await r.text())[:140]}"
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)[:140]
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
