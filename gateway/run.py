@@ -1026,6 +1026,13 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     back to the hardcoded default which fails when the active provider is
     openai-codex.
     """
+    # Runtime override — set by the /admin/model hot-swap alongside HERMES_INFERENCE_PROVIDER
+    # so the MODEL switches WITH the provider (e.g. gemini-2.5-flash, not the config default
+    # deepseek-chat — which a gemini provider 404s on). This is the function the gateway agent
+    # actually uses for its model, so the override must live here too.
+    _env_model = os.getenv("HERMES_INFERENCE_MODEL", "").strip()
+    if _env_model:
+        return _env_model
     cfg = config if config is not None else _load_gateway_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, str):
