@@ -63,6 +63,8 @@ auxiliary:
 # everything for now. They become live safety nets the moment either is paid. fallback_model
 # = DeepSeek keeps the auxiliary layers working when their own provider errors.
 fallback_providers:
+  - provider: deepseek
+    model: deepseek-chat
   - provider: gemini
     model: gemini-2.5-flash
   - provider: anthropic
