@@ -110,8 +110,14 @@ def _auto_detect_local_model(base_url: str) -> str:
 def _get_model_config() -> Dict[str, Any]:
     config = load_config()
     model_cfg = config.get("model")
+    # Runtime model override — set in-process by the /admin/model hot-swap alongside
+    # HERMES_INFERENCE_PROVIDER, so the active model can switch (e.g. deepseek-chat ->
+    # gemini-2.5-flash) WITHOUT rewriting config.yaml or restarting.
+    _env_model = os.getenv("HERMES_INFERENCE_MODEL", "").strip()
     if isinstance(model_cfg, dict):
         cfg = dict(model_cfg)
+        if _env_model:
+            cfg["default"] = _env_model
         # Accept "model" as alias for "default" (users intuitively write model.model)
         if not cfg.get("default") and cfg.get("model"):
             cfg["default"] = cfg["model"]
@@ -125,8 +131,8 @@ def _get_model_config() -> Dict[str, Any]:
                 cfg["default"] = detected
         return cfg
     if isinstance(model_cfg, str) and model_cfg.strip():
-        return {"default": model_cfg.strip()}
-    return {}
+        return {"default": _env_model or model_cfg.strip()}
+    return {"default": _env_model} if _env_model else {}
 
 
 def _provider_supports_explicit_api_mode(provider: Optional[str], configured_provider: Optional[str] = None) -> bool:

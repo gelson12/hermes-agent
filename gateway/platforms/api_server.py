@@ -985,6 +985,48 @@ class APIServerAdapter(BasePlatformAdapter):
             },
         })
 
+    async def _handle_admin_model(self, request: "web.Request") -> "web.Response":
+        """POST /admin/model {"provider": "gemini|anthropic|deepseek", "model"?: "..."} —
+        hot-swap the live LLM provider+model with NO restart. Sets HERMES_INFERENCE_PROVIDER
+        + HERMES_INFERENCE_MODEL in-process; the next /v1/chat/completions picks them up via
+        _resolve_runtime_agent_kwargs(). Confirms the target's credentials resolve (400 if
+        not). The CALLER must liveness-probe + revert on failure (the worker sends a 1-token
+        test, then re-POSTs the previous provider if it fails) — so a dead provider can never
+        stay primary and mute the brain."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        raw = str(body.get("provider", "")).strip().lower()
+        canon = {"google": "gemini", "google-gemini": "gemini",
+                 "haiku": "anthropic", "claude": "anthropic"}.get(raw, raw)
+        model_map = {"gemini": "gemini-2.5-flash",
+                     "anthropic": "claude-haiku-4-5-20251001",
+                     "deepseek": "deepseek-chat"}
+        if canon not in model_map:
+            return web.json_response(
+                {"error": {"message": f"unknown provider '{raw}' (use gemini|anthropic|deepseek)",
+                           "type": "invalid_request_error"}}, status=400)
+        model = str(body.get("model", "")).strip() or model_map[canon]
+        # Confirm the target's credentials resolve (catches a wholly-unconfigured provider).
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+            resolve_runtime_provider(requested=canon)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response(
+                {"error": {"message": f"provider '{canon}' not configured: {str(exc)[:160]}",
+                           "type": "provider_unavailable", "code": "creds_unresolved"}}, status=400)
+        previous = os.environ.get("HERMES_INFERENCE_PROVIDER", "")
+        os.environ["HERMES_INFERENCE_PROVIDER"] = canon
+        os.environ["HERMES_INFERENCE_MODEL"] = model
+        logger.warning("ADMIN /admin/model: brain -> provider=%s model=%s (was provider=%s)",
+                       canon, model, previous or "(config default)")
+        return web.json_response({"ok": True, "provider": canon, "model": model,
+                                  "previous": previous})
+
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
         auth_err = self._check_auth(request)
@@ -3582,6 +3624,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
+            self._app.router.add_post("/admin/model", self._handle_admin_model)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             # Vault self-improvement loop: feedback (Phase 3) and maturity (Phase 4)
             try:
