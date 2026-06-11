@@ -8,6 +8,18 @@ model:
   default: "deepseek-chat"
   provider: "deepseek"
 
+# User-defined custom providers (OpenAI-compatible endpoints). 'groq' makes Groq-hosted Llama
+# a settable PRIMARY for the voice brain-switch (resolve_runtime_provider matches this key).
+# Groq is FREE and benchmarked ~2-3x faster than DeepSeek for voice (0.6s vs 1.3s avg). The
+# api key comes from the GROQ_API_KEY env var.
+providers:
+  groq:
+    name: groq
+    api: https://api.groq.com/openai/v1
+    key_env: GROQ_API_KEY
+    default_model: llama-3.3-70b-versatile
+    api_mode: chat_completions
+
 # Vault memory provider (Obsidian Vault on Railway) — activates the
 # self-improvement loop: cross-session recall before each turn + Q+A
 # write-back after each turn.  Requires VAULT_SECRET (super-agent /memory)
