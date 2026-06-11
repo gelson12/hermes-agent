@@ -19,6 +19,15 @@ providers:
     key_env: GROQ_API_KEY
     default_model: llama-3.3-70b-versatile
     api_mode: chat_completions
+  # SambaNova-hosted Llama-3.3-70B — free + fast (Groq-class) and, UNLIKE Groq, accepts up to
+  # the full 128k context with NO 413, so it fits the heavy voice-agent payload (probed live:
+  # ~16k tok in ~2.8s). The viable free voice brain.
+  sambanova:
+    name: sambanova
+    api: https://api.sambanova.ai/v1
+    key_env: SAMBANOVA_API_KEY
+    default_model: Meta-Llama-3.3-70B-Instruct
+    api_mode: chat_completions
 
 # Vault memory provider (Obsidian Vault on Railway) — activates the
 # self-improvement loop: cross-session recall before each turn + Q+A

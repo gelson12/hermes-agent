@@ -1003,15 +1003,17 @@ class APIServerAdapter(BasePlatformAdapter):
         raw = str(body.get("provider", "")).strip().lower()
         canon = {"google": "gemini", "google-gemini": "gemini",
                  "haiku": "anthropic", "claude": "anthropic",
-                 "llama": "groq", "groq-llama": "groq"}.get(raw, raw)
+                 "llama": "sambanova", "groq-llama": "groq",
+                 "samba": "sambanova", "sambanova-llama": "sambanova"}.get(raw, raw)
         model_map = {"gemini": "gemini-2.5-flash",
                      "anthropic": "claude-haiku-4-5-20251001",
                      "deepseek": "deepseek-chat",
                      "groq": "llama-3.3-70b-versatile",
-                     "openrouter": "meta-llama/llama-3.3-70b-instruct:free"}
+                     "openrouter": "meta-llama/llama-3.3-70b-instruct:free",
+                     "sambanova": "Meta-Llama-3.3-70B-Instruct"}
         if canon not in model_map:
             return web.json_response(
-                {"error": {"message": f"unknown provider '{raw}' (use gemini|anthropic|deepseek|groq|openrouter)",
+                {"error": {"message": f"unknown provider '{raw}' (use gemini|anthropic|deepseek|groq|sambanova|openrouter)",
                            "type": "invalid_request_error"}}, status=400)
         model = str(body.get("model", "")).strip() or model_map[canon]
         # PRE-FLIGHT: resolve + DIRECTLY test-call the target (bypassing the fallback chain,
