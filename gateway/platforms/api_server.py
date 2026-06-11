@@ -1086,10 +1086,16 @@ class APIServerAdapter(BasePlatformAdapter):
         expect = _hmac.new(secret, (b + "." + u).encode(), hashlib.sha256).hexdigest()[:32]
         valid = bool(secret) and bool(s) and _hmac.compare_digest(s, expect)
         if valid:
+            business = _dec(b) or "A lead"
+            lead = _dec(q.get("l", ""))
+            kind = "viewed" if q.get("beacon") else "clicked"
+            try:                                    # durable log so the Closer can act on it
+                self._log_engagement(lead, business, kind)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("engagement log failed (%s)", exc)
             tok = (os.getenv("BRIDGE_TRACK_BOT_TOKEN") or "").strip()
             chat = (os.getenv("BRIDGE_TRACK_CHAT_ID") or "").strip()
             if tok and chat:
-                business = _dec(b) or "A lead"
                 how = "viewed" if q.get("beacon") else "clicked through to"
                 try:
                     import aiohttp
@@ -1114,6 +1120,45 @@ class APIServerAdapter(BasePlatformAdapter):
         if not url.startswith(("http://", "https://")):
             return web.Response(status=400, text="bad target")
         raise web.HTTPFound(location=url)
+
+    @staticmethod
+    def _engagements_path() -> str:
+        base = (os.getenv("HERMES_DATA_DIR") or "/data").rstrip("/")
+        if not os.path.isdir(base):
+            base = "/tmp"
+        return base + "/engagements.jsonl"
+
+    def _log_engagement(self, lead: str, business: str, kind: str) -> None:
+        import json as _json
+        import time as _time
+        rec = {"lead": lead, "business": business, "kind": kind, "ts": _time.time()}
+        with open(self._engagements_path(), "a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec) + "\n")
+
+    async def _handle_engagements(self, request: "web.Request") -> "web.Response":
+        """GET /engagements?since=<unix ts> — authed. Returns preview open/click events the
+        Closer polls to fire a hot, engagement-aware follow-up (vs blind time-cadence)."""
+        auth = self._check_auth(request)
+        if auth is not None:
+            return auth
+        import json as _json
+        try:
+            since = float(request.query.get("since", "0") or 0)
+        except Exception:  # noqa: BLE001
+            since = 0.0
+        out = []
+        try:
+            with open(self._engagements_path(), "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        r = _json.loads(line)
+                        if float(r.get("ts", 0)) > since:
+                            out.append(r)
+                    except Exception:  # noqa: BLE001
+                        continue
+        except FileNotFoundError:
+            pass
+        return web.json_response({"engagements": out[-500:]})
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
@@ -3714,6 +3759,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/admin/model", self._handle_admin_model)
             self._app.router.add_get("/t", self._handle_track)
+            self._app.router.add_get("/engagements", self._handle_engagements)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             # Vault self-improvement loop: feedback (Phase 3) and maturity (Phase 4)
             try:
