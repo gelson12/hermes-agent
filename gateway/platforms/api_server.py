@@ -1065,6 +1065,48 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)[:140]
 
+    async def _handle_track(self, request: "web.Request") -> "web.Response":
+        """GET /t?b=<b64 business>&u=<b64 target url>&s=<hmac> — a public, signed redirect
+        for outreach links. On a valid signature it pings the bridge Telegram ("a lead opened
+        their preview"), then 302-redirects to the target. The HMAC (shared API_SERVER_KEY)
+        prevents abuse as an open redirect. Notification is env-gated (BRIDGE_TRACK_BOT_TOKEN
+        + BRIDGE_TRACK_CHAT_ID) — inert until configured; the redirect always works."""
+        import base64
+        import hashlib
+        import hmac as _hmac
+        q = request.query
+        b, u, s = q.get("b", ""), q.get("u", ""), q.get("s", "")
+
+        def _dec(x: str) -> str:
+            try:
+                return base64.urlsafe_b64decode(x + "=" * (-len(x) % 4)).decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                return ""
+        url = _dec(u)
+        if not url.startswith(("http://", "https://")):
+            return web.Response(status=400, text="bad target")
+        secret = (os.getenv("API_SERVER_KEY") or "").encode()
+        expect = _hmac.new(secret, (b + "." + u).encode(), hashlib.sha256).hexdigest()[:32]
+        valid = bool(secret) and bool(s) and _hmac.compare_digest(s, expect)
+        if valid:
+            tok = (os.getenv("BRIDGE_TRACK_BOT_TOKEN") or "").strip()
+            chat = (os.getenv("BRIDGE_TRACK_CHAT_ID") or "").strip()
+            if tok and chat:
+                business = _dec(b) or "A lead"
+                try:
+                    import aiohttp
+                    async with aiohttp.ClientSession() as sess:
+                        await sess.post(
+                            f"https://api.telegram.org/bot{tok}/sendMessage",
+                            json={"chat_id": chat,
+                                  "text": f"\U0001F525 {business} just opened their website preview."},
+                            timeout=aiohttp.ClientTimeout(total=8))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("track notify failed (%s)", exc)
+        else:
+            logger.warning("track: bad/absent signature - redirecting without notify")
+        raise web.HTTPFound(location=url)
+
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
         auth_err = self._check_auth(request)
@@ -3663,6 +3705,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/admin/model", self._handle_admin_model)
+            self._app.router.add_get("/t", self._handle_track)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             # Vault self-improvement loop: feedback (Phase 3) and maturity (Phase 4)
             try:
