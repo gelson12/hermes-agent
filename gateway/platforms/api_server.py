@@ -1082,9 +1082,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 return base64.urlsafe_b64decode(x + "=" * (-len(x) % 4)).decode("utf-8", "replace")
             except Exception:  # noqa: BLE001
                 return ""
-        url = _dec(u)
-        if not url.startswith(("http://", "https://")):
-            return web.Response(status=400, text="bad target")
         secret = (os.getenv("API_SERVER_KEY") or "").encode()
         expect = _hmac.new(secret, (b + "." + u).encode(), hashlib.sha256).hexdigest()[:32]
         valid = bool(secret) and bool(s) and _hmac.compare_digest(s, expect)
@@ -1093,18 +1090,29 @@ class APIServerAdapter(BasePlatformAdapter):
             chat = (os.getenv("BRIDGE_TRACK_CHAT_ID") or "").strip()
             if tok and chat:
                 business = _dec(b) or "A lead"
+                how = "viewed" if q.get("beacon") else "clicked through to"
                 try:
                     import aiohttp
                     async with aiohttp.ClientSession() as sess:
                         await sess.post(
                             f"https://api.telegram.org/bot{tok}/sendMessage",
                             json={"chat_id": chat,
-                                  "text": f"\U0001F525 {business} just opened their website preview."},
+                                  "text": f"\U0001F525 {business} just {how} their website preview."},
                             timeout=aiohttp.ClientTimeout(total=8))
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("track notify failed (%s)", exc)
         else:
-            logger.warning("track: bad/absent signature - redirecting without notify")
+            logger.warning("track: bad/absent signature")
+        # Beacon mode (?beacon=1): a 1x1 transparent GIF for embedding in the published
+        # site, so even a directly-pasted visit fires the notify. No redirect.
+        if q.get("beacon"):
+            import base64 as _b64m
+            pixel = _b64m.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+            return web.Response(body=pixel, content_type="image/gif",
+                                headers={"Cache-Control": "no-store"})
+        url = _dec(u)
+        if not url.startswith(("http://", "https://")):
+            return web.Response(status=400, text="bad target")
         raise web.HTTPFound(location=url)
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
