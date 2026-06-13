@@ -1629,28 +1629,82 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return web.json_response(response_data, headers=response_headers)
 
+    def _resolve_active_llm_target(self, body: dict) -> tuple:
+        """(base_url, api_key, model) for the tool-calling passthrough, taken from
+        the ACTIVE inference provider — never hardcoded. Resolution order:
+          1. explicit override: TOOLCALL_BASE_URL + TOOLCALL_API_KEY (+ TOOLCALL_MODEL)
+          2. the active brain: TOOLCALL_PROVIDER or HERMES_INFERENCE_PROVIDER +
+             config.yaml, resolved via resolve_runtime_provider (OpenRouter/qwen3,
+             DeepSeek, Groq, …) using that provider's own API key.
+          3. legacy Gemini (GEMINI_API_KEY) for backward-compat.
+        Returns ("","","") if nothing resolves so the caller emits a clear 500.
+
+        FIX 2026-06-13: the passthrough used to be hardcoded to Gemini's endpoint,
+        so EVERY tool-bearing voice turn 403'd once Gemini billing lapsed
+        (PERMISSION_DENIED) — surfacing as "trouble reaching my reasoning",
+        independent of which brain was configured. Now it follows the active brain."""
+        import os
+        model = (os.environ.get("TOOLCALL_MODEL") or os.environ.get("HERMES_INFERENCE_MODEL") or "").strip()
+        body_model = str(body.get("model") or "").strip()
+        if not model and body_model and body_model.lower() != "hermes-agent":
+            model = body_model
+
+        ov_url = (os.environ.get("TOOLCALL_BASE_URL") or "").strip()
+        ov_key = (os.environ.get("TOOLCALL_API_KEY") or "").strip()
+        if ov_url and ov_key:
+            return ov_url, ov_key, model
+
+        requested = (os.environ.get("TOOLCALL_PROVIDER") or os.environ.get("HERMES_INFERENCE_PROVIDER") or "").strip().lower() or None
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+            rt = resolve_runtime_provider(requested=requested)
+            base_url = (rt.get("base_url") or "").strip()
+            api_key = (rt.get("api_key") or "").strip()
+            if not model:
+                model = (rt.get("model") or "").strip()
+            if base_url and api_key:
+                logger.info("toolcall passthrough -> active provider=%s model=%s",
+                            rt.get("provider") or requested or "?", model or "?")
+                return base_url, api_key, model
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("toolcall passthrough: active-provider resolve failed (%s) — falling back to Gemini", exc)
+
+        gkey = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+        if gkey:
+            gmodel = model if "gemini" in model.lower() else os.environ.get("TOOLCALL_GEMINI_MODEL", "gemini-2.5-flash")
+            return "https://generativelanguage.googleapis.com/v1beta/openai", gkey, gmodel
+
+        return "", "", model
+
     async def _handle_toolcalling_passthrough(self, request: "web.Request", body: dict) -> "web.Response":
-        """Proxy a tool-bearing chat completion to Gemini's OpenAI-compatible
-        endpoint (native function-calling). Raw SSE bytes are forwarded for
-        streaming, so no serialization of tool_calls is needed. Only reached
-        when the caller sent `tools` — all other traffic is unaffected."""
+        """Proxy a tool-bearing chat completion to the ACTIVE inference provider's
+        OpenAI-compatible endpoint (native function-calling). Raw SSE bytes are
+        forwarded for streaming, so no serialization of tool_calls is needed. Only
+        reached when the caller sent `tools` — all other traffic is unaffected.
+
+        Target = whatever brain is active (OpenRouter/qwen3, DeepSeek, …), NOT
+        hardcoded Gemini — so tool-calling turns stop 403'ing when Gemini billing
+        is down. See _resolve_active_llm_target for override envs."""
         import os
         import httpx
 
-        api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
-        if not api_key:
+        base_url, api_key, model = self._resolve_active_llm_target(body)
+        if not base_url or not api_key:
             return web.json_response(
-                _openai_error("Tool-calling passthrough needs GEMINI_API_KEY/GOOGLE_API_KEY", err_type="server_error"),
+                _openai_error("Tool-calling passthrough: no active LLM provider/key resolved "
+                              "(set HERMES_INFERENCE_PROVIDER + its key, e.g. OPENROUTER_API_KEY)",
+                              err_type="server_error"),
                 status=500,
             )
 
         upstream = dict(body)
-        # Map any non-Gemini model alias (e.g. "hermes-agent") to a real model.
-        if "gemini" not in str(body.get("model") or "").lower():
-            upstream["model"] = os.environ.get("TOOLCALL_MODEL", "gemini-2.5-flash")
+        upstream["model"] = model  # active brain's real model, not the "hermes-agent" alias
 
-        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        url = base_url.rstrip("/") + "/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        if "openrouter.ai" in url:
+            headers["HTTP-Referer"] = os.environ.get("OPENROUTER_REFERER", "https://bridge-digital-solution.com")
+            headers["X-Title"] = os.environ.get("OPENROUTER_TITLE", "OpenJarvis-Avengers")
         timeout = httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=30.0)
         is_stream = bool(body.get("stream"))
         logger.info("toolcall-passthrough: model=%s stream=%s tools=%d",
