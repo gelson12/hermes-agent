@@ -1097,24 +1097,17 @@ class APIServerAdapter(BasePlatformAdapter):
             business = _dec(b) or "A lead"
             lead = _dec(q.get("l", ""))
             kind = "viewed" if q.get("beacon") else "clicked"
-            try:                                    # durable log so the Closer can act on it
-                self._log_engagement(lead, business, kind)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("engagement log failed (%s)", exc)
-            tok = (os.getenv("BRIDGE_TRACK_BOT_TOKEN") or "").strip()
-            chat = (os.getenv("BRIDGE_TRACK_CHAT_ID") or "").strip()
-            if tok and chat:
-                how = "viewed" if q.get("beacon") else "clicked through to"
-                # Capture the viewer's IP + UA so the ping can say where/what (and flag
-                # link-preview bots / the owner's own device). Fired in the background so
-                # the geo lookup never delays the pixel/redirect we return below.
-                from gateway.platforms import track_meta
-                ip = track_meta.client_ip(request.headers.get("X-Forwarded-For", ""),
-                                          getattr(request, "remote", "") or "")
-                ua = request.headers.get("User-Agent", "")
-                _bt = asyncio.ensure_future(self._track_notify(tok, chat, business, how, ip, ua))
-                _TRACK_TASKS.add(_bt)
-                _bt.add_done_callback(_TRACK_TASKS.discard)
+            # Capture the viewer's IP + UA, then geo-resolve + log the engagement (enriched
+            # with coarse location + device, so /engagements can drive the dashboard map and
+            # the Closer) + ping Telegram — all in the background so the pixel/redirect we
+            # return below is never delayed by the geo lookup.
+            from gateway.platforms import track_meta
+            ip = track_meta.client_ip(request.headers.get("X-Forwarded-For", ""),
+                                      getattr(request, "remote", "") or "")
+            ua = request.headers.get("User-Agent", "")
+            _bt = asyncio.ensure_future(self._track_record(lead, business, kind, ip, ua))
+            _TRACK_TASKS.add(_bt)
+            _bt.add_done_callback(_TRACK_TASKS.discard)
         else:
             logger.warning("track: bad/absent signature")
         # Beacon mode (?beacon=1): a 1x1 transparent GIF for embedding in the published
@@ -1129,26 +1122,37 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.Response(status=400, text="bad target")
         raise web.HTTPFound(location=url)
 
-    async def _track_notify(self, tok: str, chat: str, business: str,
-                            how: str, ip: str, ua: str) -> None:
-        """Send the engagement ping enriched with coarse location + device (and a
-        bot/self flag). Fire-and-forget so it never delays the /t pixel/redirect;
-        fully fail-soft."""
+    async def _track_record(self, lead: str, business: str, kind: str,
+                            ip: str, ua: str) -> None:
+        """Background: geo-resolve the viewer, log the engagement enriched with coarse
+        location + device (so /engagements can drive the dashboard map and the Closer),
+        then ping Telegram. Fire-and-forget — never delays the /t pixel/redirect; fully
+        fail-soft."""
         try:
             from gateway.platforms import track_meta
             is_bot = track_meta.is_preview_bot(ua)
             geo = "" if is_bot else await track_meta.geo_lookup(ip)
-            text = track_meta.compose_ping(
-                business, how, geo=geo, device=track_meta.device_label(ua),
-                is_bot=is_bot, is_self=track_meta.is_self_ip(ip))
-            import aiohttp
-            async with aiohttp.ClientSession() as sess:
-                await sess.post(
-                    f"https://api.telegram.org/bot{tok}/sendMessage",
-                    json={"chat_id": chat, "text": text},
-                    timeout=aiohttp.ClientTimeout(total=8))
+            device = track_meta.device_label(ua)
+            is_self = track_meta.is_self_ip(ip)
+            try:
+                self._log_engagement(lead, business, kind, geo=geo, device=device,
+                                     bot=is_bot, is_self=is_self)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("engagement log failed (%s)", exc)
+            tok = (os.getenv("BRIDGE_TRACK_BOT_TOKEN") or "").strip()
+            chat = (os.getenv("BRIDGE_TRACK_CHAT_ID") or "").strip()
+            if tok and chat:
+                how = "viewed" if kind == "viewed" else "clicked through to"
+                text = track_meta.compose_ping(business, how, geo=geo, device=device,
+                                               is_bot=is_bot, is_self=is_self)
+                import aiohttp
+                async with aiohttp.ClientSession() as sess:
+                    await sess.post(
+                        f"https://api.telegram.org/bot{tok}/sendMessage",
+                        json={"chat_id": chat, "text": text},
+                        timeout=aiohttp.ClientTimeout(total=8))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("track notify failed (%s)", exc)
+            logger.warning("track record failed (%s)", exc)
 
     @staticmethod
     def _engagements_path() -> str:
@@ -1157,10 +1161,20 @@ class APIServerAdapter(BasePlatformAdapter):
             base = "/tmp"
         return base + "/engagements.jsonl"
 
-    def _log_engagement(self, lead: str, business: str, kind: str) -> None:
+    def _log_engagement(self, lead: str, business: str, kind: str, *,
+                        geo: str = "", device: str = "", bot: bool = False,
+                        is_self: bool = False) -> None:
         import json as _json
         import time as _time
         rec = {"lead": lead, "business": business, "kind": kind, "ts": _time.time()}
+        if geo:
+            rec["geo"] = geo
+        if device:
+            rec["device"] = device
+        if bot:
+            rec["bot"] = True
+        if is_self:
+            rec["self"] = True
         with open(self._engagements_path(), "a", encoding="utf-8") as f:
             f.write(_json.dumps(rec) + "\n")
 
