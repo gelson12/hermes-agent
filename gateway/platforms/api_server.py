@@ -53,6 +53,9 @@ from gateway.platforms.base import (
 
 logger = logging.getLogger(__name__)
 
+# Strong refs to fire-and-forget tracking-notify tasks so they aren't GC'd mid-flight.
+_TRACK_TASKS: set = set()
+
 # Default settings
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8642
@@ -1102,16 +1105,16 @@ class APIServerAdapter(BasePlatformAdapter):
             chat = (os.getenv("BRIDGE_TRACK_CHAT_ID") or "").strip()
             if tok and chat:
                 how = "viewed" if q.get("beacon") else "clicked through to"
-                try:
-                    import aiohttp
-                    async with aiohttp.ClientSession() as sess:
-                        await sess.post(
-                            f"https://api.telegram.org/bot{tok}/sendMessage",
-                            json={"chat_id": chat,
-                                  "text": f"\U0001F525 {business} just {how} their website preview."},
-                            timeout=aiohttp.ClientTimeout(total=8))
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("track notify failed (%s)", exc)
+                # Capture the viewer's IP + UA so the ping can say where/what (and flag
+                # link-preview bots / the owner's own device). Fired in the background so
+                # the geo lookup never delays the pixel/redirect we return below.
+                from gateway.platforms import track_meta
+                ip = track_meta.client_ip(request.headers.get("X-Forwarded-For", ""),
+                                          getattr(request, "remote", "") or "")
+                ua = request.headers.get("User-Agent", "")
+                _bt = asyncio.ensure_future(self._track_notify(tok, chat, business, how, ip, ua))
+                _TRACK_TASKS.add(_bt)
+                _bt.add_done_callback(_TRACK_TASKS.discard)
         else:
             logger.warning("track: bad/absent signature")
         # Beacon mode (?beacon=1): a 1x1 transparent GIF for embedding in the published
@@ -1125,6 +1128,27 @@ class APIServerAdapter(BasePlatformAdapter):
         if not url.startswith(("http://", "https://")):
             return web.Response(status=400, text="bad target")
         raise web.HTTPFound(location=url)
+
+    async def _track_notify(self, tok: str, chat: str, business: str,
+                            how: str, ip: str, ua: str) -> None:
+        """Send the engagement ping enriched with coarse location + device (and a
+        bot/self flag). Fire-and-forget so it never delays the /t pixel/redirect;
+        fully fail-soft."""
+        try:
+            from gateway.platforms import track_meta
+            is_bot = track_meta.is_preview_bot(ua)
+            geo = "" if is_bot else await track_meta.geo_lookup(ip)
+            text = track_meta.compose_ping(
+                business, how, geo=geo, device=track_meta.device_label(ua),
+                is_bot=is_bot, is_self=track_meta.is_self_ip(ip))
+            import aiohttp
+            async with aiohttp.ClientSession() as sess:
+                await sess.post(
+                    f"https://api.telegram.org/bot{tok}/sendMessage",
+                    json={"chat_id": chat, "text": text},
+                    timeout=aiohttp.ClientTimeout(total=8))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("track notify failed (%s)", exc)
 
     @staticmethod
     def _engagements_path() -> str:
