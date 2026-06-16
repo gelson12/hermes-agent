@@ -1738,6 +1738,25 @@ class APIServerAdapter(BasePlatformAdapter):
         upstream = dict(body)
         upstream["model"] = model  # active brain's real model, not the "hermes-agent" alias
 
+        # ── Self-improvement loop bridge (fail-open) ─────────────────────────
+        # Voice turns carry tools and land here, bypassing the AIAgent and thus all
+        # recall/learning. Re-attach the loop: inject the prior turn's vault recall
+        # (zero latency) now, and write this turn back after the response. Any error
+        # leaves the raw passthrough behaviour unchanged.
+        _ptm = None
+        _sess_key = _sess_id = _user_text = ""
+        try:
+            from gateway.platforms import passthrough_memory as _ptm
+            _sess_key = (request.headers.get("X-Hermes-Session-Key", "") or "").strip()
+            _sess_id = (request.headers.get("X-Hermes-Session-Id", "") or "").strip()
+            _user_text = _ptm.last_user_text(body)
+            _recall = _ptm.recall_block(_sess_key, _sess_id, _user_text)
+            if _recall:
+                upstream["messages"] = _ptm.inject_recall(upstream.get("messages") or [], _recall)
+                logger.info("passthrough_memory: injected recall (%d chars) scope=%s", len(_recall), _sess_key or "?")
+        except Exception as _rexc:  # noqa: BLE001
+            logger.debug("passthrough memory bridge setup skipped: %s", _rexc)
+
         url = base_url.rstrip("/") + "/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         if "openrouter.ai" in url:
@@ -1752,7 +1771,15 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     r = await client.post(url, json=upstream, headers=headers)
-                return web.json_response(json.loads(r.text), status=r.status_code)
+                _data = json.loads(r.text)
+                try:
+                    if _ptm is not None:
+                        _asst = ((_data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                        if _asst:
+                            _ptm.write_back(_sess_key, _sess_id, _user_text, _asst)
+                except Exception:  # noqa: BLE001
+                    pass
+                return web.json_response(_data, status=r.status_code)
             except Exception as e:  # noqa: BLE001
                 logger.error("toolcall-passthrough (non-stream) failed: %s", e)
                 return web.json_response(
@@ -1771,6 +1798,7 @@ class APIServerAdapter(BasePlatformAdapter):
             sse_headers.update(cors)
         response = web.StreamResponse(status=200, headers=sse_headers)
         await response.prepare(request)
+        _acc = _ptm.SSEContentAccumulator() if _ptm is not None else None
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream("POST", url, json=upstream, headers=headers) as up:
@@ -1781,10 +1809,16 @@ class APIServerAdapter(BasePlatformAdapter):
                         )
                         await response.write(b"data: [DONE]\n\n")
                         return response
-                    # Forward the upstream SSE bytes verbatim (already OpenAI shape).
+                    # Forward the upstream SSE bytes verbatim (already OpenAI shape),
+                    # accumulating the assistant text for the memory write-back.
                     async for chunk in up.aiter_bytes():
                         if chunk:
                             await response.write(chunk)
+                            if _acc is not None:
+                                try:
+                                    _acc.feed(chunk)
+                                except Exception:  # noqa: BLE001
+                                    pass
         except Exception as e:  # noqa: BLE001
             logger.error("toolcall-passthrough (stream) failed: %s", e)
             try:
@@ -1794,6 +1828,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 await response.write(b"data: [DONE]\n\n")
             except Exception:  # noqa: BLE001
                 pass
+        # Write the completed turn back to memory (ingest Q/A + reflect + distill).
+        try:
+            if _acc is not None:
+                _asst = _acc.text()
+                if _asst:
+                    _ptm.write_back(_sess_key, _sess_id, _user_text, _asst)
+        except Exception:  # noqa: BLE001
+            pass
         return response
 
     async def _write_sse_chat_completion(
