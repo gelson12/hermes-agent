@@ -57,6 +57,36 @@ def test_gating_and_missing_inputs(monkeypatch):
     assert p.recall_block("scope", "sid", "") == ""  # no user text
 
 
+def test_is_substantive_gates_chitchat_but_keeps_facts():
+    # trivial: bare acks / greetings → not learned
+    assert p.is_substantive("hey jarvis", "Good evening, sir.") is False
+    assert p.is_substantive("thanks", "You're welcome, sir.") is False
+    assert p.is_substantive("are you there", "Yes, sir.") is False
+    assert p.is_substantive("ok", "Acknowledged.") is False          # short reply
+    # substantive: real facts / procedures → learned
+    assert p.is_substantive(
+        "remember my favourite colour is teal",
+        "Noted, sir — I'll remember your favourite colour is teal going forward.") is True
+    assert p.is_substantive(
+        "how do I restart the worker",
+        "Run `railway redeploy` on the service, then watch /health until it returns 200, "
+        "which usually takes a few minutes on a cold boot.") is True
+
+
+def test_writeback_skips_trivial_turn(monkeypatch):
+    calls = []
+
+    class _Stub:
+        def sync_turn(self, u, a, *, session_id=""):
+            calls.append((u, a))
+
+    monkeypatch.setenv("HERMES_PASSTHROUGH_MEMORY", "1")
+    monkeypatch.setattr(p, "_get_provider", lambda sk, sid, plat: _Stub())
+    p.write_back("voice-jarvis", "s", "hey jarvis", "Good evening, sir.")
+    time.sleep(0.2)
+    assert calls == []                       # trivial turn never reached the provider
+
+
 def test_status_reports_loop_state(monkeypatch):
     monkeypatch.setenv("HERMES_PASSTHROUGH_MEMORY", "0")
     assert p.status("scope", "sid") == "off"
@@ -95,9 +125,11 @@ def test_recall_and_writeback_drive_the_provider(monkeypatch):
     assert calls["prefetch"] == [("what about teal", "sid1")]
     assert calls["queue"] == [("what about teal", "sid1")]      # this turn queued for next
 
-    p.write_back("voice-jarvis", "sid1", "u", "a")              # background thread
+    # substantive turn (trivial chit-chat is gated out separately)
+    _u, _a = "what is my favourite colour", "Your favourite colour is teal, sir — noted."
+    p.write_back("voice-jarvis", "sid1", _u, _a)                # background thread
     for _ in range(50):
         if calls["sync"]:
             break
         time.sleep(0.02)
-    assert calls["sync"] == [("u", "a", "sid1")]
+    assert calls["sync"] == [(_u, _a, "sid1")]

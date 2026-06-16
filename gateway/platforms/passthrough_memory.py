@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -160,11 +161,40 @@ def recall_block(session_key: str, session_id: str, user_text: str, *, platform:
         return ""
 
 
+# Pure chit-chat / acknowledgements that carry no recallable fact. Gating these out
+# keeps the vault (and the per-turn reflector aux call) focused on substance.
+# Conservative by design: when in doubt, the turn is treated as substantive.
+# A single throwaway token/phrase…
+_TRIVIAL_TOKEN = (
+    r"(?:hi|hey+|hello|yo|jarvis|ok|okay|kay|thanks|thank\s+you|ty|cool|nice|great|"
+    r"got\s+it|sounds\s+good|good\s+(?:morning|afternoon|evening|night)|"
+    r"are\s+you\s+(?:there|awake|up)|you\s+(?:there|up)|test(?:ing)?|please|sir)"
+)
+# …and the input is trivial only if it is made ENTIRELY of them ("hey jarvis", "ok thanks").
+_TRIVIAL_USER_RE = re.compile(r"^\s*(?:%s[\s!.,?]*)+$" % _TRIVIAL_TOKEN, re.I)
+
+
+def is_substantive(user_text: str, assistant_text: str) -> bool:
+    """Whether a finished turn is worth learning from. Skips greetings, bare
+    acknowledgements and one-liners so the vault and the reflector aren't fed pure
+    chit-chat. Conservative — anything non-trivial returns True (learn it)."""
+    a = (assistant_text or "").strip()
+    u = (user_text or "").strip()
+    if len(a) < 16:                              # "Done, sir.", "Okay." — confirmations
+        return False
+    if _TRIVIAL_USER_RE.match(u) and len(a) < 160:  # greeting in AND short reply out
+        return False
+    return True
+
+
 def write_back(session_key: str, session_id: str, user_text: str, assistant_text: str,
                *, platform: str = "api_server") -> None:
     """Persist the finished turn (ingest Q/A + reflect + distill) via the provider's
-    sync_turn, off the hot path. Never raises; no-op if disabled/unconfigured."""
+    sync_turn, off the hot path. Never raises; no-op if disabled/unconfigured or if
+    the turn is pure chit-chat (no recallable substance)."""
     if not (enabled() and session_key and user_text and assistant_text):
+        return
+    if not is_substantive(user_text, assistant_text):
         return
 
     def _go() -> None:
