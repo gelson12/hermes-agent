@@ -42,6 +42,16 @@ logger = logging.getLogger("hermes.passthrough_memory")
 _PROVIDERS: Dict[str, Any] = {}
 _LOCK = threading.Lock()
 
+# Cumulative write-back outcomes, surfaced on X-Hermes-Memory-Writes so the WRITE
+# half of the loop is observable (attach alone doesn't prove a turn actually
+# persisted — sync_turn runs in the background and could fail against the backend).
+_WRITES: Dict[str, Any] = {"ok": 0, "fail": 0, "skip": 0, "last_error": ""}
+
+
+def writes_summary() -> str:
+    with _LOCK:
+        return "ok=%d fail=%d skip=%d" % (_WRITES["ok"], _WRITES["fail"], _WRITES["skip"])
+
 
 def enabled() -> bool:
     return os.environ.get("HERMES_PASSTHROUGH_MEMORY", "1").strip().lower() not in (
@@ -200,10 +210,20 @@ def write_back(session_key: str, session_id: str, user_text: str, assistant_text
     def _go() -> None:
         try:
             prov = _get_provider(session_key, session_id, platform)
-            if prov is not None:
-                prov.sync_turn(user_text, assistant_text, session_id=session_id)
+            if prov is None:
+                with _LOCK:
+                    _WRITES["skip"] += 1
+                return
+            prov.sync_turn(user_text, assistant_text, session_id=session_id)
+            with _LOCK:
+                _WRITES["ok"] += 1
         except Exception as exc:  # noqa: BLE001
-            logger.debug("passthrough_memory write_back failed: %s", exc)
+            with _LOCK:
+                _WRITES["fail"] += 1
+                _WRITES["last_error"] = str(exc)[:200]
+            # WARNING (visible at prod log level): a failing write means nothing is
+            # being learned — that must not be silent.
+            logger.warning("passthrough_memory write_back failed: %s", exc)
 
     threading.Thread(target=_go, name="passthrough-writeback", daemon=True).start()
 

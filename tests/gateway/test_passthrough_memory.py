@@ -73,6 +73,31 @@ def test_is_substantive_gates_chitchat_but_keeps_facts():
         "which usually takes a few minutes on a cold boot.") is True
 
 
+def test_writeback_counts_outcomes(monkeypatch):
+    monkeypatch.setenv("HERMES_PASSTHROUGH_MEMORY", "1")
+    p._WRITES.update({"ok": 0, "fail": 0, "skip": 0, "last_error": ""})
+
+    class _OkProv:
+        def sync_turn(self, u, a, *, session_id=""):
+            return None
+
+    class _BadProv:
+        def sync_turn(self, u, a, *, session_id=""):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(p, "_get_provider", lambda sk, sid, plat: _OkProv())
+    p.write_back("k", "s", "what is the plan for launch day", "Here is the full launch-day plan, sir.")
+    monkeypatch.setattr(p, "_get_provider", lambda sk, sid, plat: _BadProv())
+    p.write_back("k", "s", "another substantive question here", "Another substantive answer here, sir.")
+    for _ in range(50):
+        if "ok=1" in p.writes_summary() and "fail=1" in p.writes_summary():
+            break
+        time.sleep(0.02)
+    assert "ok=1" in p.writes_summary()
+    assert "fail=1" in p.writes_summary()
+    assert p._WRITES["last_error"] == "backend down"
+
+
 def test_writeback_skips_trivial_turn(monkeypatch):
     calls = []
 

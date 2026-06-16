@@ -1767,6 +1767,11 @@ class APIServerAdapter(BasePlatformAdapter):
             h = {"X-Hermes-Memory": _mem_state}
             if _mem_recall_chars:
                 h["X-Hermes-Memory-Recall"] = str(_mem_recall_chars)
+            if _ptm is not None:
+                try:
+                    h["X-Hermes-Memory-Writes"] = _ptm.writes_summary()
+                except Exception:  # noqa: BLE001
+                    pass
             if extra:
                 h.update(extra)
             return h
@@ -1806,10 +1811,15 @@ class APIServerAdapter(BasePlatformAdapter):
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
             "X-Hermes-Memory": _mem_state,
-            "Access-Control-Expose-Headers": "X-Hermes-Memory, X-Hermes-Memory-Recall",
+            "Access-Control-Expose-Headers": "X-Hermes-Memory, X-Hermes-Memory-Recall, X-Hermes-Memory-Writes",
         }
         if _mem_recall_chars:
             sse_headers["X-Hermes-Memory-Recall"] = str(_mem_recall_chars)
+        if _ptm is not None:
+            try:
+                sse_headers["X-Hermes-Memory-Writes"] = _ptm.writes_summary()
+            except Exception:  # noqa: BLE001
+                pass
         origin = request.headers.get("Origin", "")
         cors = self._cors_headers_for_origin(origin) if origin else None
         if cors:
