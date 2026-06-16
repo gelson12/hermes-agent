@@ -1745,6 +1745,8 @@ class APIServerAdapter(BasePlatformAdapter):
         # leaves the raw passthrough behaviour unchanged.
         _ptm = None
         _sess_key = _sess_id = _user_text = ""
+        _mem_state = "off"          # surfaced on the X-Hermes-Memory response header
+        _mem_recall_chars = 0
         try:
             from gateway.platforms import passthrough_memory as _ptm
             _sess_key = (request.headers.get("X-Hermes-Session-Key", "") or "").strip()
@@ -1753,9 +1755,21 @@ class APIServerAdapter(BasePlatformAdapter):
             _recall = _ptm.recall_block(_sess_key, _sess_id, _user_text)
             if _recall:
                 upstream["messages"] = _ptm.inject_recall(upstream.get("messages") or [], _recall)
+                _mem_recall_chars = len(_recall)
                 logger.info("passthrough_memory: injected recall (%d chars) scope=%s", len(_recall), _sess_key or "?")
+            # State for the observability header (cache hit; provider already resolved above).
+            _mem_state = _ptm.status(_sess_key, _sess_id)
         except Exception as _rexc:  # noqa: BLE001
+            _mem_state = "err"
             logger.debug("passthrough memory bridge setup skipped: %s", _rexc)
+
+        def _mem_headers(extra=None):
+            h = {"X-Hermes-Memory": _mem_state}
+            if _mem_recall_chars:
+                h["X-Hermes-Memory-Recall"] = str(_mem_recall_chars)
+            if extra:
+                h.update(extra)
+            return h
 
         url = base_url.rstrip("/") + "/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -1779,7 +1793,7 @@ class APIServerAdapter(BasePlatformAdapter):
                             _ptm.write_back(_sess_key, _sess_id, _user_text, _asst)
                 except Exception:  # noqa: BLE001
                     pass
-                return web.json_response(_data, status=r.status_code)
+                return web.json_response(_data, status=r.status_code, headers=_mem_headers())
             except Exception as e:  # noqa: BLE001
                 logger.error("toolcall-passthrough (non-stream) failed: %s", e)
                 return web.json_response(
@@ -1791,7 +1805,11 @@ class APIServerAdapter(BasePlatformAdapter):
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
+            "X-Hermes-Memory": _mem_state,
+            "Access-Control-Expose-Headers": "X-Hermes-Memory, X-Hermes-Memory-Recall",
         }
+        if _mem_recall_chars:
+            sse_headers["X-Hermes-Memory-Recall"] = str(_mem_recall_chars)
         origin = request.headers.get("Origin", "")
         cors = self._cors_headers_for_origin(origin) if origin else None
         if cors:

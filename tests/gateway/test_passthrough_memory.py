@@ -57,6 +57,22 @@ def test_gating_and_missing_inputs(monkeypatch):
     assert p.recall_block("scope", "sid", "") == ""  # no user text
 
 
+def test_status_reports_loop_state(monkeypatch):
+    monkeypatch.setenv("HERMES_PASSTHROUGH_MEMORY", "0")
+    assert p.status("scope", "sid") == "off"
+    monkeypatch.setenv("HERMES_PASSTHROUGH_MEMORY", "1")
+    assert p.status("", "sid") == "skip"                      # no scope key
+    monkeypatch.setattr(p, "_get_provider", lambda sk, sid, plat: None)
+    assert p.status("scope", "sid") == "skip"                 # no backend
+    monkeypatch.setattr(p, "_get_provider", lambda sk, sid, plat: object())
+    assert p.status("scope", "sid") == "attached"             # live loop
+
+    def _boom(sk, sid, plat):
+        raise RuntimeError("init blew up")
+    monkeypatch.setattr(p, "_get_provider", _boom)
+    assert p.status("scope", "sid") == "err"
+
+
 def test_recall_and_writeback_drive_the_provider(monkeypatch):
     calls = {"prefetch": [], "queue": [], "sync": []}
 

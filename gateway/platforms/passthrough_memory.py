@@ -77,8 +77,24 @@ def _get_provider(session_key: str, session_id: str, platform: str):
         logger.info("passthrough_memory: vault loop ATTACHED to passthrough for scope=%s", session_key)
         return prov
     except Exception as exc:  # noqa: BLE001
-        logger.debug("passthrough_memory: provider init failed: %s", exc)
+        # WARNING (not debug): production runs the gateway logger at WARNING, so a
+        # silent no-op here would be invisible. A failed attach is worth one line.
+        logger.warning("passthrough_memory: provider init failed (loop NOT attached): %s", exc)
         return None
+
+
+def status(session_key: str, session_id: str = "", *, platform: str = "api_server") -> str:
+    """Cheap, log-independent state of the loop for THIS request, for an observability
+    header. 'off' (disabled), 'skip' (no scope key / no backend), 'attached' (live),
+    'err'. After recall_block() the provider is cached, so this is a dict hit."""
+    if not enabled():
+        return "off"
+    if not session_key:
+        return "skip"
+    try:
+        return "attached" if _get_provider(session_key, session_id, platform) is not None else "skip"
+    except Exception:  # noqa: BLE001
+        return "err"
 
 
 def last_user_text(body: Dict[str, Any]) -> str:
