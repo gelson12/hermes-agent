@@ -35,6 +35,63 @@ def test_inject_recall_folds_into_system_without_mutating():
     assert p.inject_recall(msgs, "") is msgs       # empty recall → unchanged
 
 
+def test_inject_context_folds_recall_and_goals():
+    msgs = [{"role": "system", "content": "base"}, {"role": "user", "content": "q"}]
+    out = p.inject_context(msgs, recall="[Vault Recall]\n- foo", goals="# Active Goals\n- [a1] (high) ship it")
+    assert "Vault Recall" in out[0]["content"]
+    assert "Active Goals" in out[0]["content"] and "ship it" in out[0]["content"]
+    assert msgs[0]["content"] == "base"                    # not mutated
+    assert p.inject_context(msgs) is msgs                  # neither → unchanged
+    # goals only, no system message → a system message is created
+    out2 = p.inject_context([{"role": "user", "content": "q"}], goals="# Active Goals\n- [b2] (normal) learn")
+    assert out2[0]["role"] == "system" and "Active Goals" in out2[0]["content"]
+
+
+def test_looks_like_goal_prefilter():
+    assert p._looks_like_goal("my goal is to launch the app") is True
+    assert p._looks_like_goal("remind me to renew the domain") is True
+    assert p._looks_like_goal("I want to learn Spanish this year") is True
+    assert p._looks_like_goal("what's the weather today?") is False
+    assert p._looks_like_goal("open my email") is False
+    assert p._looks_like_goal("ok") is False
+
+
+def test_active_goal_count():
+    block = "# Active Goals\n\n- [a1] (high) ship the app\n- [b2] (normal) renew domain\n\nKeep aligned."
+    assert p.active_goal_count(block) == 2
+    assert p.active_goal_count("") == 0
+
+
+def test_maybe_track_goal_adds_then_dedupes(monkeypatch):
+    monkeypatch.setenv("HERMES_VOICE_GOALS", "1")
+    monkeypatch.setenv("HERMES_GOALS_ENABLED", "true")
+    p._GOALS_COUNTS.update({"added": 0, "skip": 0, "dupe": 0, "fail": 0})
+    p._RECENT_GOALS.clear()
+    added = []
+
+    class _Goals:
+        def handle(self, name, args):
+            added.append((name, args))
+            return '{"ok": true, "goal": {"id": "abc"}}'
+
+    class _Prov:
+        _goals = _Goals()
+
+    # LLM judge says "durable goal"
+    monkeypatch.setattr(p, "_extract_goal_llm", lambda u, a: {"text": "launch the app by friday", "priority": "high"})
+    p.maybe_track_goal("sk", _Prov(), "my goal is to launch the app by friday", "Noted, sir.")
+    assert added and added[0][0] == "goal_add"
+    assert "added=1" in p.goals_summary()
+    # same goal again → deduped, not re-added
+    p.maybe_track_goal("sk", _Prov(), "my goal is to launch the app by friday", "Noted, sir.")
+    assert len(added) == 1
+
+    # pre-filter miss → judge never called, nothing added
+    monkeypatch.setattr(p, "_extract_goal_llm", lambda u, a: (_ for _ in ()).throw(AssertionError("should not run")))
+    p.maybe_track_goal("sk", _Prov(), "what's the weather?", "It is sunny, sir.")
+    assert len(added) == 1
+
+
 def test_sse_accumulator_handles_splits_and_ignores_noise():
     a = p.SSEContentAccumulator()
     a.feed(b'data: {"choices":[{"delta":{"content":"Hel')   # split mid-line

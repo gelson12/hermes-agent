@@ -1747,16 +1747,21 @@ class APIServerAdapter(BasePlatformAdapter):
         _sess_key = _sess_id = _user_text = ""
         _mem_state = "off"          # surfaced on the X-Hermes-Memory response header
         _mem_recall_chars = 0
+        _goals_active = 0
         try:
             from gateway.platforms import passthrough_memory as _ptm
             _sess_key = (request.headers.get("X-Hermes-Session-Key", "") or "").strip()
             _sess_id = (request.headers.get("X-Hermes-Session-Id", "") or "").strip()
             _user_text = _ptm.last_user_text(body)
             _recall = _ptm.recall_block(_sess_key, _sess_id, _user_text)
-            if _recall:
-                upstream["messages"] = _ptm.inject_recall(upstream.get("messages") or [], _recall)
+            _goals = _ptm.goals_block_for(_sess_key, _sess_id)   # active goals → stay aligned
+            if _recall or _goals:
+                upstream["messages"] = _ptm.inject_context(
+                    upstream.get("messages") or [], recall=_recall, goals=_goals)
                 _mem_recall_chars = len(_recall)
-                logger.info("passthrough_memory: injected recall (%d chars) scope=%s", len(_recall), _sess_key or "?")
+                _goals_active = _ptm.active_goal_count(_goals)
+                if _recall:
+                    logger.info("passthrough_memory: injected recall (%d chars) scope=%s", len(_recall), _sess_key or "?")
             # State for the observability header (cache hit; provider already resolved above).
             _mem_state = _ptm.status(_sess_key, _sess_id)
         except Exception as _rexc:  # noqa: BLE001
@@ -1770,6 +1775,7 @@ class APIServerAdapter(BasePlatformAdapter):
             if _ptm is not None:
                 try:
                     h["X-Hermes-Memory-Writes"] = _ptm.writes_summary()
+                    h["X-Hermes-Goals"] = "active=%d %s" % (_goals_active, _ptm.goals_summary())
                 except Exception:  # noqa: BLE001
                     pass
             if extra:
@@ -1811,13 +1817,14 @@ class APIServerAdapter(BasePlatformAdapter):
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
             "X-Hermes-Memory": _mem_state,
-            "Access-Control-Expose-Headers": "X-Hermes-Memory, X-Hermes-Memory-Recall, X-Hermes-Memory-Writes",
+            "Access-Control-Expose-Headers": "X-Hermes-Memory, X-Hermes-Memory-Recall, X-Hermes-Memory-Writes, X-Hermes-Goals",
         }
         if _mem_recall_chars:
             sse_headers["X-Hermes-Memory-Recall"] = str(_mem_recall_chars)
         if _ptm is not None:
             try:
                 sse_headers["X-Hermes-Memory-Writes"] = _ptm.writes_summary()
+                sse_headers["X-Hermes-Goals"] = "active=%d %s" % (_goals_active, _ptm.goals_summary())
             except Exception:  # noqa: BLE001
                 pass
         origin = request.headers.get("Origin", "")

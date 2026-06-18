@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("hermes.passthrough_memory")
@@ -125,17 +126,22 @@ def last_user_text(body: Dict[str, Any]) -> str:
     return ""
 
 
-def inject_recall(messages: List[Dict[str, Any]], recall: str) -> List[Dict[str, Any]]:
-    """Return a NEW messages list with the recalled vault context folded into the
-    system message (or prepended as one). Never mutates the input; on any issue
-    returns the original list so the request is sent unchanged."""
-    if not recall:
-        return messages
-    try:
-        block = (
+def inject_context(messages: List[Dict[str, Any]], *, recall: str = "", goals: str = "") -> List[Dict[str, Any]]:
+    """Return a NEW messages list with recalled vault context AND/OR active goals
+    folded into the system message (or prepended as one). Never mutates the input;
+    on any issue returns the original list so the request is sent unchanged."""
+    blocks: List[str] = []
+    if recall:
+        blocks.append(
             "Relevant memory from earlier sessions (use it; if it conflicts with the "
             "user, trust the user — do NOT invent facts not grounded here):\n" + recall
         )
+    if goals:
+        blocks.append(goals)  # active_goals_block() is already self-describing
+    if not blocks:
+        return messages
+    try:
+        block = "\n\n".join(blocks)
         out = [dict(m) for m in (messages or [])]
         for m in out:
             if m.get("role") == "system" and isinstance(m.get("content"), str):
@@ -145,6 +151,11 @@ def inject_recall(messages: List[Dict[str, Any]], recall: str) -> List[Dict[str,
         return [{"role": "system", "content": block}] + out
     except Exception:  # noqa: BLE001
         return messages
+
+
+def inject_recall(messages: List[Dict[str, Any]], recall: str) -> List[Dict[str, Any]]:
+    """Back-compat shim: fold just the recall block in (see inject_context)."""
+    return inject_context(messages, recall=recall)
 
 
 def recall_block(session_key: str, session_id: str, user_text: str, *, platform: str = "api_server") -> str:
@@ -224,8 +235,216 @@ def write_back(session_key: str, session_id: str, user_text: str, assistant_text
             # WARNING (visible at prod log level): a failing write means nothing is
             # being learned — that must not be silent.
             logger.warning("passthrough_memory write_back failed: %s", exc)
+        # Goal extraction shares this background thread (already off the hot path).
+        # Cheap pre-filter inside maybe_track_goal gates the auxiliary-LLM judge.
+        try:
+            if prov is not None:
+                maybe_track_goal(session_key, prov, user_text, assistant_text)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("passthrough_memory goal step skipped: %s", exc)
 
     threading.Thread(target=_go, name="passthrough-writeback", daemon=True).start()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Goal-tracking on the voice path.
+#
+# The AIAgent path injects active goals into the system prompt every turn and lets
+# the model call goal_* tools. Neither happens on the passthrough: the AIAgent is
+# bypassed, and a goal_* tool_call would be handed to the WORKER (which only knows
+# its own hand-off/device tools, not goals). So this bridges both halves:
+#   READ  — inject the active-goals block (zero-latency, bridge-cached + bg refresh)
+#   WRITE — a cheap regex pre-filter gates a strict auxiliary-LLM "is this a durable
+#           goal?" judge; only a clear yes becomes a goal_add. Background only.
+# Gated by HERMES_VOICE_GOALS (default on) AND HERMES_GOALS_ENABLED (the tracker's
+# own gate). Fail-open everywhere.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_GOALS_CACHE: Dict[str, Any] = {}          # session_key -> (ts, block_str)
+_GOALS_TTL = 120.0
+_RECENT_GOALS: Dict[str, List[str]] = {}   # session_key -> normalized goal texts (dupe guard)
+_GOALS_COUNTS: Dict[str, int] = {"added": 0, "skip": 0, "dupe": 0, "fail": 0}
+
+_GOAL_HINT_RE = re.compile(
+    r"\b(?:my goal|goal:|remind me to|i want to|i'd like to|i would like to|"
+    r"i need to|i'm trying to|i am trying to|i plan to|i intend to|"
+    r"by (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|next week|"
+    r"end of (?:the )?(?:day|week|month))|"
+    r"help me (?:build|launch|finish|write|plan|learn|set up|create|organi[sz]e))\b",
+    re.I,
+)
+
+_GOAL_JUDGE_SYSTEM = (
+    "You decide whether the user's utterance states a PERSISTENT goal worth tracking "
+    "across sessions (spanning multiple turns or days), versus a transient single-turn "
+    "request. Reply with JSON ONLY: "
+    '{"is_goal": true|false, "goal": "<one short imperative sentence, <12 words>", '
+    '"due": "<YYYY-MM-DD or empty>", "priority": "low|normal|high"}. '
+    "is_goal=false for questions, chit-chat, one-off commands (\"open my email\", "
+    "\"what's the weather\"), or anything already completed. is_goal=true only for durable "
+    "intents like \"I want to launch the app by Friday\", \"remind me to renew the domain\", "
+    "\"my goal is to learn Spanish\"."
+)
+
+_JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}")
+
+
+def _extract_json(text: str) -> Optional[Dict[str, Any]]:
+    if not text:
+        return None
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.IGNORECASE | re.MULTILINE)
+    try:
+        return json.loads(cleaned)
+    except Exception:  # noqa: BLE001
+        pass
+    m = _JSON_BLOCK_RE.search(cleaned)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def goals_enabled() -> bool:
+    voice = os.environ.get("HERMES_VOICE_GOALS", "1").strip().lower() not in ("0", "false", "no", "off", "")
+    tracker = os.environ.get("HERMES_GOALS_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    return voice and tracker
+
+
+def goals_summary() -> str:
+    with _LOCK:
+        return "added=%d skip=%d fail=%d" % (
+            _GOALS_COUNTS["added"], _GOALS_COUNTS["skip"] + _GOALS_COUNTS["dupe"], _GOALS_COUNTS["fail"]
+        )
+
+
+def active_goal_count(block: str) -> int:
+    """Number of goals listed in an active_goals_block() string (lines like '- [id] …')."""
+    if not block:
+        return 0
+    return sum(1 for ln in block.splitlines() if ln.lstrip().startswith("- ["))
+
+
+def goals_block(session_key: str, provider) -> str:
+    """Zero-latency active-goals block for the system prompt. Returns the bridge-cached
+    value and kicks a background refresh when stale (active_goals_block may hit the
+    network, so it must never run on the hot path). '' when disabled / no goals."""
+    if not (goals_enabled() and session_key and provider is not None):
+        return ""
+    now = time.time()
+    ts, block = _GOALS_CACHE.get(session_key, (0.0, ""))
+    if now - ts > _GOALS_TTL:
+        def _refresh() -> None:
+            try:
+                b = provider._goals.active_goals_block(max_goals=5) or ""
+                _GOALS_CACHE[session_key] = (time.time(), b)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("passthrough_memory goals refresh failed: %s", exc)
+        threading.Thread(target=_refresh, name="goals-refresh", daemon=True).start()
+    return block  # may be empty/stale on the first turn; warmed for the next
+
+
+def goals_block_for(session_key: str, session_id: str, *, platform: str = "api_server") -> str:
+    """Active-goals block via the cached provider for this scope. '' on anything missing."""
+    if not (enabled() and goals_enabled() and session_key):
+        return ""
+    try:
+        prov = _get_provider(session_key, session_id, platform)
+        if prov is None:
+            return ""
+        return goals_block(session_key, prov)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("passthrough_memory goals_block_for failed: %s", exc)
+        return ""
+
+
+def _looks_like_goal(user_text: str) -> bool:
+    """Cheap pre-filter so the auxiliary-LLM judge only runs on plausible candidates."""
+    u = (user_text or "").strip()
+    if len(u) < 8:
+        return False
+    return bool(_GOAL_HINT_RE.search(u))
+
+
+def _extract_goal_llm(user_text: str, assistant_text: str) -> Optional[Dict[str, Any]]:
+    """Strict auxiliary-LLM judge: return {text, due?, priority?} if the turn states a
+    durable goal, else None. Reuses Hermes's cheap auxiliary client (same as the
+    reflector). None on any failure → conservatively, no goal is created."""
+    try:
+        from agent.auxiliary_client import get_text_auxiliary_client
+        client, model = get_text_auxiliary_client(task="reflection")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("passthrough_memory goals: aux client unavailable: %s", exc)
+        return None
+    if client is None or not model:
+        return None
+    use_model = os.environ.get("HERMES_GOALS_MODEL", "").strip() or model
+    try:
+        resp = client.chat.completions.create(
+            model=use_model,
+            messages=[
+                {"role": "system", "content": _GOAL_JUDGE_SYSTEM},
+                {"role": "user", "content": "User said: %s\nAssistant replied: %s\nJSON:" % (
+                    (user_text or "")[:500], (assistant_text or "")[:300])},
+            ],
+            max_tokens=120,
+            temperature=0.0,
+        )
+        raw = resp.choices[0].message.content or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("passthrough_memory goals: aux call failed: %s", exc)
+        return None
+    parsed = _extract_json(raw)
+    if not parsed or not parsed.get("is_goal"):
+        return None
+    goal = str(parsed.get("goal") or "").strip().rstrip(".!").strip()
+    if not (4 <= len(goal) <= 200):
+        return None
+    out: Dict[str, Any] = {"text": goal}
+    due = str(parsed.get("due") or "").strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", due):
+        out["due"] = due
+    prio = str(parsed.get("priority") or "").strip().lower()
+    if prio in ("low", "normal", "high"):
+        out["priority"] = prio
+    return out
+
+
+def _norm_goal(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").lower().strip())
+
+
+def maybe_track_goal(session_key: str, provider, user_text: str, assistant_text: str) -> None:
+    """Background: if the turn states a durable goal, persist it via the GoalTracker.
+    Pre-filter (cheap) → LLM judge (only on candidates) → dupe guard → goal_add."""
+    if not goals_enabled() or provider is None or not _looks_like_goal(user_text):
+        return
+    extracted = _extract_goal_llm(user_text, assistant_text)
+    if not extracted:
+        with _LOCK:
+            _GOALS_COUNTS["skip"] += 1
+        return
+    key = _norm_goal(extracted["text"])
+    seen = _RECENT_GOALS.setdefault(session_key, [])
+    if any(key in s or s in key for s in seen):
+        with _LOCK:
+            _GOALS_COUNTS["dupe"] += 1
+        return
+    try:
+        res = provider._goals.handle("goal_add", extracted) or ""
+        ok = '"ok"' in res and '"error"' not in res
+        with _LOCK:
+            _GOALS_COUNTS["added" if ok else "fail"] += 1
+        if ok:
+            seen.append(key)
+            del seen[:-20]                       # cap the dupe-guard memory
+            _GOALS_CACHE.pop(session_key, None)  # so the new goal shows next turn
+            logger.warning("passthrough_memory: goal tracked: %r", extracted["text"][:80])
+    except Exception as exc:  # noqa: BLE001
+        with _LOCK:
+            _GOALS_COUNTS["fail"] += 1
+        logger.warning("passthrough_memory goal_add failed: %s", exc)
 
 
 class SSEContentAccumulator:
