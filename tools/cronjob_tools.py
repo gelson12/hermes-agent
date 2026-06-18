@@ -279,6 +279,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["enabled_toolsets"] = job["enabled_toolsets"]
     if job.get("workdir"):
         result["workdir"] = job["workdir"]
+    if job.get("adaptive"):
+        result["adaptive"] = job["adaptive"]
     return result
 
 
@@ -302,6 +304,7 @@ def cronjob(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
+    adaptive: Optional[Any] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -369,6 +372,7 @@ def cronjob(
                 enabled_toolsets=enabled_toolsets or None,
                 workdir=_normalize_optional_job_value(workdir),
                 no_agent=_no_agent,
+                adaptive=adaptive,
             )
             return json.dumps(
                 {
@@ -635,6 +639,20 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "type": "string",
                 "description": "Optional absolute path to run the job from. When set, AGENTS.md / CLAUDE.md / .cursorrules from that directory are injected into the system prompt, and the terminal/file/code_exec tools use it as their working directory — useful for running a job inside a specific project repo. Must be an absolute path that exists. When unset (default), preserves the original behaviour: no project context files, tools use the scheduler's cwd. On update, pass an empty string to clear. Jobs with workdir run sequentially (not parallel) to keep per-job directories isolated."
             },
+            "adaptive": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Optional. For RECURRING interval jobs only ('every Nm'): enable "
+                    "OUTCOME-ADAPTIVE cadence. The job checks MORE often after a tick "
+                    "that has something to report and BACKS OFF when ticks are quiet "
+                    "(a [SILENT] or empty response), staying within bounds "
+                    "(default min = base/4, max = base*4, backoff 2x off the 'every Nm' "
+                    "interval). Pass true. Ideal for 'tell me WHEN X changes' watches so "
+                    "you poll fast around events and rarely when nothing is happening. "
+                    "Ignored for one-shot / cron-expression schedules."
+                ),
+            },
         },
         "required": ["action"]
     }
@@ -683,6 +701,7 @@ registry.register(
         enabled_toolsets=args.get("enabled_toolsets"),
         workdir=args.get("workdir"),
         no_agent=args.get("no_agent"),
+        adaptive=args.get("adaptive"),
         task_id=kw.get("task_id"),
     ))(),
     check_fn=check_cronjob_requirements,

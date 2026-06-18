@@ -395,6 +395,82 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 
 
 # =============================================================================
+# Adaptive cadence (outcome-driven rescheduling) — the cron analog of the
+# harness's dynamic loop / ScheduleWakeup. A recurring-interval "watch" job set
+# adaptive TIGHTENS its interval when a tick has something to report and BACKS
+# OFF when ticks are quiet (a [SILENT]/empty response), staying within
+# [min_s, max_s]. Default ON; set HERMES_ADAPTIVE_CRON=0 to pin adaptive jobs to
+# their base interval (fixed-cadence fallback for the whole shared brain).
+# =============================================================================
+
+def _adaptive_enabled() -> bool:
+    return (os.environ.get("HERMES_ADAPTIVE_CRON", "1") or "1") not in ("0", "false", "False", "")
+
+
+def _clampf(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def _normalize_adaptive(parsed_schedule: Dict[str, Any], adaptive: Any) -> Optional[Dict[str, Any]]:
+    """Validate/shape the adaptive spec. Only meaningful for recurring intervals.
+    ``adaptive`` may be True (use defaults) or a dict {min_s, max_s, backoff}."""
+    if adaptive in (None, False, ""):
+        return None
+    if parsed_schedule.get("kind") != "interval":
+        return None  # adaptive backoff only applies to recurring interval jobs
+    if adaptive is True:
+        adaptive = {}
+    if not isinstance(adaptive, dict):
+        return None
+    base_s = max(1.0, float(parsed_schedule.get("minutes", 1)) * 60.0)
+
+    def _num(key: str, default: float) -> float:
+        try:
+            v = float(adaptive.get(key))
+            return v if v > 0 else default
+        except (TypeError, ValueError):
+            return default
+
+    min_s = _num("min_s", base_s / 4.0)
+    max_s = _num("max_s", base_s * 4.0)
+    backoff = _num("backoff", 2.0)
+    if backoff < 1.0:
+        backoff = 2.0
+    if min_s > max_s:
+        min_s, max_s = max_s, min_s
+    return {
+        "min_s": min_s,
+        "max_s": max_s,
+        "backoff": backoff,
+        "current_s": _clampf(base_s, min_s, max_s),
+        "last_signal": None,
+    }
+
+
+def _adaptive_next(job: Dict[str, Any], now_iso: str, signal: Optional[str]) -> str:
+    """Advance an adaptive job's next_run_at from its run outcome. Mutates
+    ``job['adaptive']['current_s']`` and returns the ISO next-run timestamp."""
+    a = dict(job.get("adaptive") or {})
+    base_s = max(1.0, float(job.get("schedule", {}).get("minutes", 1)) * 60.0)
+    cur = float(a.get("current_s") or base_s)
+    min_s = float(a.get("min_s", base_s / 4.0))
+    max_s = float(a.get("max_s", base_s * 4.0))
+    backoff = float(a.get("backoff", 2.0)) or 2.0
+    s = (signal or "").strip().lower()
+    if s in ("changed", "productive", "hit", "met", "report"):
+        cur = max(min_s, cur / backoff)        # something to report → check sooner
+    elif s in ("idle", "quiet", "nochange", "silent", "error"):
+        cur = min(max_s, cur * backoff)        # nothing happening → back off
+    # unknown / None → hold current cadence
+    cur = _clampf(cur, min_s, max_s)
+    a["current_s"] = cur
+    a["last_signal"] = s or None
+    job["adaptive"] = a
+    now = _ensure_aware(datetime.fromisoformat(now_iso))
+    return (now + timedelta(seconds=cur)).isoformat()
+
+
+# =============================================================================
 # Job CRUD Operations
 # =============================================================================
 
@@ -496,6 +572,7 @@ def create_job(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     no_agent: bool = False,
+    adaptive: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -574,6 +651,7 @@ def create_job(
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
+    normalized_adaptive = _normalize_adaptive(parsed_schedule, adaptive)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -627,6 +705,7 @@ def create_job(
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
+        "adaptive": normalized_adaptive,
     }
 
     jobs = load_jobs()
@@ -766,15 +845,18 @@ def remove_job(job_id: str) -> bool:
 
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+                 delivery_error: Optional[str] = None, signal: Optional[str] = None):
     """
     Mark a job as having been run.
-    
+
     Updates last_run_at, last_status, increments completed count,
     computes next_run_at, and auto-deletes if repeat limit reached.
 
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
+
+    ``signal`` ("changed"/"idle"/"error") drives outcome-adaptive cadence for
+    jobs created with ``adaptive`` — see ``_adaptive_next``.
     """
     with _jobs_file_lock:
         jobs = load_jobs()
@@ -802,6 +884,18 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)
+
+                # Outcome-adaptive override: a watch job that had something to
+                # report tightens its interval; a quiet/idle tick backs off. Only
+                # for recurring interval jobs, and only when the kill-switch is on.
+                if (job.get("adaptive") and _adaptive_enabled()
+                        and job.get("schedule", {}).get("kind") == "interval"):
+                    try:
+                        job["next_run_at"] = _adaptive_next(job, now, signal)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "adaptive next_run_at failed for %s (%s); using "
+                            "schedule default", job_id, exc)
 
                 # If no next run, decide whether this is terminal completion
                 # (one-shot) or a transient failure (recurring schedule couldn't

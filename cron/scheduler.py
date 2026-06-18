@@ -1761,12 +1761,24 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     success = False
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
-                mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+                # Adaptive cadence signal (WS-C): a delivered, non-silent response
+                # means "something to report" → tighten; a quiet tick ([SILENT] or
+                # empty) means "nothing changed" → back off. Only computed for
+                # jobs that opted into adaptive cadence.
+                adaptive_signal = None
+                if job.get("adaptive"):
+                    quiet = (not final_response) or (
+                        SILENT_MARKER in (final_response or "").strip().upper())
+                    adaptive_signal = "idle" if quiet else "changed"
+
+                mark_job_run(job["id"], success, error,
+                             delivery_error=delivery_error, signal=adaptive_signal)
                 return True
 
             except Exception as e:
                 logger.error("Error processing job %s: %s", job['id'], e)
-                mark_job_run(job["id"], False, str(e))
+                mark_job_run(job["id"], False, str(e),
+                             signal="error" if job.get("adaptive") else None)
                 return False
 
         # Partition due jobs: those with a per-job workdir mutate
