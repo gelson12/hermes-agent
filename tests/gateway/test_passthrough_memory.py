@@ -188,6 +188,40 @@ def test_writeback_skips_trivial_turn(monkeypatch):
     assert calls == []                       # trivial turn never reached the provider
 
 
+def test_goal_update_completes_active_goal(monkeypatch):
+    monkeypatch.setenv("HERMES_VOICE_GOALS", "1")
+    monkeypatch.setenv("HERMES_GOALS_ENABLED", "true")
+    p._GOALS_COUNTS.update({"added": 0, "skip": 0, "dupe": 0, "fail": 0, "done": 0, "prog": 0})
+    handled = []
+
+    class _Goals:
+        def _cached_active(self, n):
+            return [{"id": "abc123", "text": "launch the Bridge app by Friday"}]
+        def handle(self, name, args):
+            handled.append((name, args))
+            return '{"ok": true, "goal": {"id": "abc123"}}'
+
+    class _Prov:
+        _goals = _Goals()
+
+    # judge says complete → goal_complete on the matching id
+    monkeypatch.setattr(p, "_judge_goal_update", lambda u, a, b: {"action": "complete", "goal_id": "abc123"})
+    p.maybe_update_goal("sk", _Prov(), "I've finished launching the Bridge app!", "Congratulations, sir.")
+    assert ("goal_complete", {"id": "abc123"}) in handled
+    assert "done=1" in p.goals_summary()
+
+    # pre-filter miss → judge never runs, no handle
+    handled.clear()
+    monkeypatch.setattr(p, "_judge_goal_update", lambda u, a, b: (_ for _ in ()).throw(AssertionError("nope")))
+    p.maybe_update_goal("sk", _Prov(), "what's on my plate today?", "You have three goals, sir.")
+    assert handled == []
+
+    # judge returns an id NOT in the active list → ignored (no invented ids)
+    monkeypatch.setattr(p, "_judge_goal_update", lambda u, a, b: {"action": "complete", "goal_id": "zzz999"})
+    p.maybe_update_goal("sk", _Prov(), "I finished it", "Great, sir.")
+    assert handled == []
+
+
 def test_status_reports_loop_state(monkeypatch):
     monkeypatch.setenv("HERMES_PASSTHROUGH_MEMORY", "0")
     assert p.status("scope", "sid") == "off"

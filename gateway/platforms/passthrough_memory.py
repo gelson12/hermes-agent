@@ -238,11 +238,12 @@ def write_back(session_key: str, session_id: str, user_text: str, assistant_text
             # WARNING (visible at prod log level): a failing write means nothing is
             # being learned — that must not be silent.
             logger.warning("passthrough_memory write_back failed: %s", exc)
-        # Goal extraction shares this background thread (already off the hot path).
-        # Cheap pre-filter inside maybe_track_goal gates the auxiliary-LLM judge.
+        # Goal create + complete/progress share this background thread (off the hot
+        # path). Cheap pre-filters inside each gate the auxiliary-LLM judge.
         try:
             if prov is not None:
                 maybe_track_goal(session_key, prov, user_text, assistant_text)
+                maybe_update_goal(session_key, prov, user_text, assistant_text)
         except Exception as exc:  # noqa: BLE001
             logger.debug("passthrough_memory goal step skipped: %s", exc)
 
@@ -266,7 +267,7 @@ def write_back(session_key: str, session_id: str, user_text: str, assistant_text
 _GOALS_CACHE: Dict[str, Any] = {}          # session_key -> (ts, block_str)
 _GOALS_TTL = 120.0
 _RECENT_GOALS: Dict[str, List[str]] = {}   # session_key -> normalized goal texts (dupe guard)
-_GOALS_COUNTS: Dict[str, int] = {"added": 0, "skip": 0, "dupe": 0, "fail": 0}
+_GOALS_COUNTS: Dict[str, int] = {"added": 0, "skip": 0, "dupe": 0, "fail": 0, "done": 0, "prog": 0}
 
 _GOAL_HINT_RE = re.compile(
     r"\b(?:my goal|goal:|remind me to|i want to|i'd like to|i would like to|"
@@ -317,8 +318,9 @@ def goals_enabled() -> bool:
 
 def goals_summary() -> str:
     with _LOCK:
-        return "added=%d skip=%d fail=%d" % (
-            _GOALS_COUNTS["added"], _GOALS_COUNTS["skip"] + _GOALS_COUNTS["dupe"], _GOALS_COUNTS["fail"]
+        return "added=%d skip=%d fail=%d done=%d prog=%d" % (
+            _GOALS_COUNTS["added"], _GOALS_COUNTS["skip"] + _GOALS_COUNTS["dupe"],
+            _GOALS_COUNTS["fail"], _GOALS_COUNTS["done"], _GOALS_COUNTS["prog"],
         )
 
 
@@ -448,6 +450,102 @@ def maybe_track_goal(session_key: str, provider, user_text: str, assistant_text:
         with _LOCK:
             _GOALS_COUNTS["fail"] += 1
         logger.warning("passthrough_memory goal_add failed: %s", exc)
+
+
+# Closes the goal loop: detect when the user reports COMPLETING or PROGRESSING an
+# existing goal, so active goals don't accumulate forever (and stop polluting the
+# always-injected goal block once achieved).
+_GOAL_UPDATE_RE = re.compile(
+    r"\b(?:done|finished|completed?|wrapped up|shipped|launched|sorted|"
+    r"made (?:some )?progress|making progress|started (?:on|working)|got .* done|"
+    r"i'?ve (?:now )?(?:done|finished|completed|shipped|launched|sent|built))\b",
+    re.I,
+)
+
+_GOAL_UPDATE_SYSTEM = (
+    "You are given the user's ACTIVE goals (id + text) and what they just said. Decide if "
+    "the utterance reports COMPLETING or PROGRESSING one of those exact goals. Reply JSON "
+    'ONLY: {"action":"complete|progress|none","goal_id":"<id from the list or empty>",'
+    '"note":"<short progress note or empty>"}. Use "complete" only for clear completion of '
+    'a listed goal; "progress" for incremental movement; "none" otherwise. goal_id MUST be '
+    "one of the provided ids — never invent one."
+)
+
+
+def _judge_goal_update(user_text: str, assistant_text: str, goals_brief: str) -> Optional[Dict[str, Any]]:
+    """Strict auxiliary-LLM judge: does the turn complete/progress a listed goal? Reuses
+    the reflector's cheap aux client. None on any failure (→ no change)."""
+    try:
+        from agent.auxiliary_client import get_text_auxiliary_client
+        client, model = get_text_auxiliary_client(task="reflection")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("passthrough_memory goal-update: aux unavailable: %s", exc)
+        return None
+    if client is None or not model:
+        return None
+    use_model = os.environ.get("HERMES_GOALS_MODEL", "").strip() or model
+    try:
+        resp = client.chat.completions.create(
+            model=use_model,
+            messages=[
+                {"role": "system", "content": _GOAL_UPDATE_SYSTEM},
+                {"role": "user", "content": "ACTIVE GOALS:\n%s\n\nUser said: %s\nAssistant replied: %s\nJSON:" % (
+                    goals_brief, (user_text or "")[:400], (assistant_text or "")[:200])},
+            ],
+            max_tokens=80,
+            temperature=0.0,
+        )
+        raw = resp.choices[0].message.content or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("passthrough_memory goal-update: aux call failed: %s", exc)
+        return None
+    return _extract_json(raw)
+
+
+def maybe_update_goal(session_key: str, provider, user_text: str, assistant_text: str) -> None:
+    """Background: if the turn reports finishing/progressing an ACTIVE goal, mark it done
+    or append a progress note. Pre-filter → judge (only with the active list) → handle().
+    Conservative: only acts on a goal_id that's actually in the active list."""
+    if not goals_enabled() or provider is None or not _GOAL_UPDATE_RE.search(user_text or ""):
+        return
+    try:
+        actives = provider._goals._cached_active(8) or []
+    except Exception:  # noqa: BLE001
+        actives = []
+    if not actives:
+        return
+    valid = {g.get("id"): g.get("text", "") for g in actives if g.get("id")}
+    if not valid:
+        return
+    brief = "\n".join("- [%s] %s" % (gid, txt) for gid, txt in valid.items())
+    judged = _judge_goal_update(user_text, assistant_text, brief)
+    if not judged:
+        return
+    action = str(judged.get("action") or "none").lower()
+    gid = str(judged.get("goal_id") or "").strip()
+    if gid not in valid:
+        return
+    try:
+        if action == "complete":
+            res = provider._goals.handle("goal_complete", {"id": gid}) or ""
+            ok = '"ok"' in res and '"error"' not in res
+            with _LOCK:
+                _GOALS_COUNTS["done" if ok else "fail"] += 1
+            if ok:
+                _GOALS_CACHE.pop(session_key, None)   # drop it from the injected block
+                logger.warning("passthrough_memory: goal completed [%s] %r", gid, valid[gid][:60])
+        elif action == "progress":
+            note = str(judged.get("note") or "").strip()[:200] or "progress noted"
+            res = provider._goals.handle("goal_progress", {"id": gid, "note": note}) or ""
+            ok = '"ok"' in res and '"error"' not in res
+            with _LOCK:
+                _GOALS_COUNTS["prog" if ok else "fail"] += 1
+            if ok:
+                logger.warning("passthrough_memory: goal progress [%s]: %r", gid, note[:60])
+    except Exception as exc:  # noqa: BLE001
+        with _LOCK:
+            _GOALS_COUNTS["fail"] += 1
+        logger.warning("passthrough_memory goal update failed: %s", exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
