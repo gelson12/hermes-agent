@@ -126,10 +126,11 @@ def last_user_text(body: Dict[str, Any]) -> str:
     return ""
 
 
-def inject_context(messages: List[Dict[str, Any]], *, recall: str = "", goals: str = "") -> List[Dict[str, Any]]:
-    """Return a NEW messages list with recalled vault context AND/OR active goals
-    folded into the system message (or prepended as one). Never mutates the input;
-    on any issue returns the original list so the request is sent unchanged."""
+def inject_context(messages: List[Dict[str, Any]], *, recall: str = "", goals: str = "",
+                   evolved: str = "") -> List[Dict[str, Any]]:
+    """Return a NEW messages list with recalled vault context, active goals AND/OR the
+    evolved-prompt addendum folded into the system message (or prepended as one). Never
+    mutates the input; on any issue returns the original list (request sent unchanged)."""
     blocks: List[str] = []
     if recall:
         blocks.append(
@@ -137,7 +138,9 @@ def inject_context(messages: List[Dict[str, Any]], *, recall: str = "", goals: s
             "user, trust the user — do NOT invent facts not grounded here):\n" + recall
         )
     if goals:
-        blocks.append(goals)  # active_goals_block() is already self-describing
+        blocks.append(goals)      # active_goals_block() is already self-describing
+    if evolved:
+        blocks.append(evolved)    # evolved guidance addendum (appended, never replaces)
     if not blocks:
         return messages
     try:
@@ -445,6 +448,59 @@ def maybe_track_goal(session_key: str, provider, user_text: str, assistant_text:
         with _LOCK:
             _GOALS_COUNTS["fail"] += 1
         logger.warning("passthrough_memory goal_add failed: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt-evolver on the voice path.
+#
+# The AIAgent appends the domain's active evolved prompt (a guidance addendum) to the
+# system prompt; the passthrough never did. Bridge the READ: inject current_prompt()
+# for the voice domain, zero-latency (bridge-cached + background refresh, since
+# current_prompt may hit the network and seed the baseline). The OUTCOME signal that
+# drives evolution is wired at the reflector (see reflection.py); promotion stays
+# deliberate, so nothing unproven is ever auto-applied to this shared brain.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EVOLVER_CACHE: Dict[str, Any] = {}        # session_key -> (ts, prompt_str, domain)
+_EVOLVER_TTL = 120.0
+
+
+def _evolver_domain(session_key: str) -> str:
+    from plugins.memory.vault.provider import _domain_from_kwargs
+    return _domain_from_kwargs("api_server", session_key or "")
+
+
+def evolved_prompt_block(session_key: str, session_id: str = "", *, platform: str = "api_server") -> str:
+    """Active evolved-prompt addendum for the voice domain. Zero-latency: returns the
+    bridge-cached value and refreshes in the background (current_prompt may hit the
+    network + seeds the baseline). '' when the evolver is disabled / no active addendum."""
+    if not (enabled() and session_key):
+        return ""
+    try:
+        from agent import prompt_evolver as _ev
+        if not _ev._enabled():
+            return ""
+    except Exception:  # noqa: BLE001
+        return ""
+    now = time.time()
+    ts, prompt, _dom = _EVOLVER_CACHE.get(session_key, (0.0, "", ""))
+    if now - ts > _EVOLVER_TTL:
+        def _refresh() -> None:
+            try:
+                from agent import prompt_evolver as _ev2
+                dom = _evolver_domain(session_key)
+                _ev2.ensure_seed(dom)                 # bootstrap a baseline so outcomes have a target
+                p = _ev2.current_prompt(dom) or ""
+                _EVOLVER_CACHE[session_key] = (time.time(), p, dom)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("passthrough_memory evolver refresh failed: %s", exc)
+        threading.Thread(target=_refresh, name="evolver-refresh", daemon=True).start()
+    return prompt
+
+
+def evolver_summary(session_key: str) -> str:
+    _ts, prompt, dom = _EVOLVER_CACHE.get(session_key, (0.0, "", ""))
+    return "domain=%s applied=%d" % (dom or "?", 1 if prompt else 0)
 
 
 class SSEContentAccumulator:

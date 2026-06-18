@@ -173,6 +173,61 @@ def current_prompt(domain: str) -> str:
     return prompt_text
 
 
+_SEEDED: Dict[str, str] = {}            # domain -> active variant_id (after seed/lookup)
+_SEED_LOCK = threading.Lock()
+
+# Self-drive proposal generation in-process (the n8n cron that used to call
+# maybe_propose/maybe_promote is offline). Every _PROPOSE_EVERY recorded outcomes for a
+# domain, try a proposal in the background. This only ever CREATES candidate variants for
+# review — promotion stays deliberate, so the shared brain is never silently rewritten.
+_OUTCOME_COUNTS: Dict[str, int] = {}
+_OUTCOME_LOCK = threading.Lock()
+_PROPOSE_EVERY = int(os.environ.get("HERMES_EVOLVER_PROPOSE_EVERY", "40") or "40")
+
+
+def active_variant_id(domain: str) -> Optional[str]:
+    """variant_id of the active prompt for a domain (populates the cache), or None."""
+    if not _enabled() or not domain:
+        return None
+    current_prompt(domain)              # populates _CACHE[domain]['prompt_id']
+    with _CACHE_LOCK:
+        return (_CACHE.get(domain) or {}).get("prompt_id")
+
+
+def ensure_seed(domain: str) -> Optional[str]:
+    """Guarantee the domain has an ACTIVE variant so outcomes have a target and the
+    loop can bootstrap. If none exists, seed an EMPTY (behaviorally-neutral) baseline —
+    current_prompt() then returns "" so NOTHING is appended to the system prompt until a
+    candidate is deliberately promoted. Idempotent + cached (one write per domain)."""
+    if not _enabled() or not domain:
+        return None
+    with _SEED_LOCK:
+        if domain in _SEEDED:
+            return _SEEDED[domain]
+    vid = active_variant_id(domain)
+    if vid:
+        with _SEED_LOCK:
+            _SEEDED[domain] = vid
+        return vid
+    vid = _record_prompt_variant(domain, "", status="active", samples=0, success_rate=0.0)
+    if vid:
+        with _CACHE_LOCK:
+            _CACHE[domain] = {"prompt": "", "prompt_id": vid, "fetched_at": time.time()}
+        with _SEED_LOCK:
+            _SEEDED[domain] = vid
+        logger.info("hermes.evolver.seeded domain=%s vid=%s (empty baseline)", domain, vid)
+    return vid
+
+
+def evolver_state(domain: str) -> Dict[str, Any]:
+    """Lightweight state for an observability header: is a non-empty evolved addendum
+    currently active for this domain?"""
+    prompt = current_prompt(domain) if (_enabled() and domain) else ""
+    with _CACHE_LOCK:
+        vid = (_CACHE.get(domain) or {}).get("prompt_id")
+    return {"enabled": _enabled(), "domain": domain or "", "variant": vid or "", "chars": len(prompt)}
+
+
 def record_outcome(domain: str, variant_id: str, success: bool) -> None:
     """Called from the reflector when a turn completes with a known active variant.
 
@@ -202,16 +257,32 @@ def record_outcome(domain: str, variant_id: str, success: bool) -> None:
             except Exception:
                 pass
 
+    # Self-driven proposal: every _PROPOSE_EVERY outcomes, try maybe_propose in the
+    # background (creates a candidate only — never promotes). Replaces the offline cron.
+    try:
+        with _OUTCOME_LOCK:
+            _OUTCOME_COUNTS[domain] = _OUTCOME_COUNTS.get(domain, 0) + 1
+            due = _PROPOSE_EVERY > 0 and (_OUTCOME_COUNTS[domain] % _PROPOSE_EVERY == 0)
+        if due:
+            threading.Thread(target=lambda: maybe_propose(domain),
+                             name="evolver-propose", daemon=True).start()
+    except Exception as exc:
+        logger.debug("evolver: propose trigger skipped: %s", exc)
+
 
 # ---------------------------------------------------------------------------
-# Propose / promote — called by n8n cron (not on hot path)
+# Propose / promote — maybe_propose now also self-driven by record_outcome above
+# (the n8n cron that called these is offline); maybe_promote stays deliberate.
 # ---------------------------------------------------------------------------
 
 _PROPOSE_SYSTEM = (
-    "You are a prompt engineer. Given a current system prompt and a sample of "
-    "recent low-success outcomes (and any high-success outcomes for contrast), "
-    "propose ONE refined system prompt that should improve performance.\n\n"
-    "Return ONLY the new prompt text — no commentary, no markdown fences."
+    "You refine an assistant's behavioral guidance. Given the CURRENT guidance addendum "
+    "(may be empty) and a summary of recent outcomes, propose ONE short addendum "
+    "(2-5 sentences) of concrete, behaviorally-specific guidance that should raise the "
+    "success rate — e.g. how to handle ambiguity, ground answers in retrieved memory, "
+    "stay concise, or use tools. It will be APPENDED to the base system prompt, so do "
+    "NOT restate persona, identity, or tool lists.\n\n"
+    "Return ONLY the addendum text — no commentary, no markdown fences."
 )
 
 
@@ -274,17 +345,17 @@ def maybe_propose(domain: str, min_samples: int = 30, min_failure_rate: float = 
     failure_rate = agg["fail"] / max(agg["total"], 1)
     if failure_rate < min_failure_rate:
         return None
-    # Pull the active prompt text and some failing/successful examples for context.
+    # Pull the active addendum text (may be empty for a freshly-seeded baseline —
+    # that's fine; we then propose the FIRST addendum purely from the outcome signal).
     content = cur.get("content") or ""
     m = re.search(r"PROMPT_VARIANT[^\n]*\n\n(.*)", content, re.DOTALL)
     cur_text = m.group(1).strip() if m else ""
-    if not cur_text:
-        return None
     user_prompt = (
-        f"CURRENT PROMPT (for domain `{domain}`):\n{cur_text}\n\n"
-        f"OUTCOMES: {agg['success']} success / {agg['fail']} fail ({agg['total']} total).\n"
-        f"Failure rate is {failure_rate:.0%} — please propose a refined version that "
-        "addresses likely weaknesses. Return only the new prompt text."
+        f"DOMAIN: {domain}\n"
+        f"CURRENT GUIDANCE ADDENDUM:\n{cur_text or '(none yet)'}\n\n"
+        f"RECENT OUTCOMES: {agg['success']} success / {agg['fail']} fail ({agg['total']} total), "
+        f"failure rate {failure_rate:.0%}. Propose a concise addendum that should raise success. "
+        "Return only the addendum text."
     )
     new_text = _aux_call(system=_PROPOSE_SYSTEM, user=user_prompt)
     if not new_text or new_text.strip() == cur_text.strip():

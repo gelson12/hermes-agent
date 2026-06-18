@@ -1754,10 +1754,11 @@ class APIServerAdapter(BasePlatformAdapter):
             _sess_id = (request.headers.get("X-Hermes-Session-Id", "") or "").strip()
             _user_text = _ptm.last_user_text(body)
             _recall = _ptm.recall_block(_sess_key, _sess_id, _user_text)
-            _goals = _ptm.goals_block_for(_sess_key, _sess_id)   # active goals → stay aligned
-            if _recall or _goals:
+            _goals = _ptm.goals_block_for(_sess_key, _sess_id)        # active goals → stay aligned
+            _evolved = _ptm.evolved_prompt_block(_sess_key, _sess_id)  # evolved-prompt addendum
+            if _recall or _goals or _evolved:
                 upstream["messages"] = _ptm.inject_context(
-                    upstream.get("messages") or [], recall=_recall, goals=_goals)
+                    upstream.get("messages") or [], recall=_recall, goals=_goals, evolved=_evolved)
                 _mem_recall_chars = len(_recall)
                 _goals_active = _ptm.active_goal_count(_goals)
                 if _recall:
@@ -1776,6 +1777,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 try:
                     h["X-Hermes-Memory-Writes"] = _ptm.writes_summary()
                     h["X-Hermes-Goals"] = "active=%d %s" % (_goals_active, _ptm.goals_summary())
+                    h["X-Hermes-Evolver"] = _ptm.evolver_summary(_sess_key)
                 except Exception:  # noqa: BLE001
                     pass
             if extra:
@@ -1817,7 +1819,7 @@ class APIServerAdapter(BasePlatformAdapter):
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
             "X-Hermes-Memory": _mem_state,
-            "Access-Control-Expose-Headers": "X-Hermes-Memory, X-Hermes-Memory-Recall, X-Hermes-Memory-Writes, X-Hermes-Goals",
+            "Access-Control-Expose-Headers": "X-Hermes-Memory, X-Hermes-Memory-Recall, X-Hermes-Memory-Writes, X-Hermes-Goals, X-Hermes-Evolver",
         }
         if _mem_recall_chars:
             sse_headers["X-Hermes-Memory-Recall"] = str(_mem_recall_chars)
@@ -1825,6 +1827,7 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 sse_headers["X-Hermes-Memory-Writes"] = _ptm.writes_summary()
                 sse_headers["X-Hermes-Goals"] = "active=%d %s" % (_goals_active, _ptm.goals_summary())
+                sse_headers["X-Hermes-Evolver"] = _ptm.evolver_summary(_sess_key)
             except Exception:  # noqa: BLE001
                 pass
         origin = request.headers.get("Origin", "")

@@ -47,6 +47,25 @@ def test_inject_context_folds_recall_and_goals():
     assert out2[0]["role"] == "system" and "Active Goals" in out2[0]["content"]
 
 
+def test_inject_context_includes_evolved_addendum():
+    msgs = [{"role": "system", "content": "base"}, {"role": "user", "content": "q"}]
+    out = p.inject_context(msgs, evolved="Be concise and ground answers in memory.")
+    assert "Be concise and ground answers in memory." in out[0]["content"]
+    assert "base" in out[0]["content"] and msgs[0]["content"] == "base"
+    # recall + goals + evolved all fold in together
+    out2 = p.inject_context(msgs, recall="R", goals="# Active Goals\n- [g] x", evolved="E-add")
+    c = out2[0]["content"]
+    assert "R" in c and "Active Goals" in c and "E-add" in c
+
+
+def test_evolved_prompt_block_gated_off(monkeypatch):
+    # evolver disabled → bridge returns "" regardless
+    monkeypatch.setenv("HERMES_PASSTHROUGH_MEMORY", "1")
+    monkeypatch.setenv("HERMES_PROMPT_EVOLVER_ENABLED", "false")
+    assert p.evolved_prompt_block("voice-jarvis", "sid") == ""
+    assert p.evolved_prompt_block("", "sid") == ""        # no scope key
+
+
 def test_looks_like_goal_prefilter():
     assert p._looks_like_goal("my goal is to launch the app") is True
     assert p._looks_like_goal("remind me to renew the domain") is True

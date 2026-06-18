@@ -282,6 +282,19 @@ def _do_reflect(
         except Exception as exc:
             logger.debug("reflector: obsidian-mind write failed: %s", exc)
 
+    # Phase 7 — feed the prompt-evolver this turn's success signal for the domain's
+    # active variant. This is the link that was missing everywhere: without it the
+    # evolver had no outcomes to aggregate and could never propose/improve. Gated by
+    # the evolver's own flag; best-effort (never affects reflection).
+    try:
+        from agent import prompt_evolver as _evolver
+        if _evolver._enabled():
+            vid = _evolver.active_variant_id(domain) or _evolver.ensure_seed(domain)
+            if vid:
+                _evolver.record_outcome(domain, vid, bool(norm["success"]))
+    except Exception as exc:
+        logger.debug("reflector: prompt-evolver outcome skipped: %s", exc)
+
 
 def reflect_async(
     *,
