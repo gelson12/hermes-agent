@@ -228,6 +228,111 @@ def evolver_state(domain: str) -> Dict[str, Any]:
     return {"enabled": _enabled(), "domain": domain or "", "variant": vid or "", "chars": len(prompt)}
 
 
+def _parse_variant(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Normalize a vault hit into {domain, variant_id, status, text, samples, success_rate}."""
+    content = item.get("content") or ""
+    meta = item.get("metadata") or {}
+    hdr = re.search(r"PROMPT_VARIANT \[([^\]]+)\] domain=(\S+) status=(\w+)", content)
+    vid = meta.get("variant_id") or (hdr.group(1) if hdr else "")
+    dom = meta.get("domain") or (hdr.group(2) if hdr else "")
+    status = meta.get("status") or (hdr.group(3) if hdr else "")
+    if not vid:
+        return None
+    body = re.search(r"PROMPT_VARIANT[^\n]*\n\n(.*)", content, re.DOTALL)
+    return {
+        "domain": dom,
+        "variant_id": vid,
+        "status": status,
+        "text": (body.group(1).strip() if body else ""),
+        "samples": meta.get("samples"),
+        "success_rate": meta.get("success_rate"),
+    }
+
+
+def list_candidates(domain: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    """Proposed (status=candidate) prompt addenda awaiting human review. domain=None
+    scans broadly. Read-only. Returns [] when disabled / nothing proposed yet.
+
+    Uses the same _search_prompts path current_prompt() relies on, so whatever the
+    backend surfaces for `active` it also surfaces for `candidate`."""
+    if not _enabled():
+        return []
+    raw_items: List[Any] = []
+    if domain:
+        try:
+            raw_items = _search_prompts(domain, status_filter="candidate", limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("evolver: list_candidates search failed: %s", exc)
+    else:
+        # No domain → broad scan across backends for any candidate variant.
+        for backend in (_mind_client(), _vault_client()):
+            if backend is None:
+                continue
+            try:
+                raw = backend.search(query="PROMPT_VARIANT candidate", limit=limit) \
+                    if hasattr(backend, "search") else backend.export(tag="prompt", limit=limit)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("evolver: list_candidates broad scan failed: %s", exc)
+                continue
+            finally:
+                try:
+                    backend.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            if isinstance(raw, dict):
+                raw = raw.get("results") or raw.get("memories") or raw.get("notes") or []
+            raw_items.extend(raw or [])
+
+    seen, uniq = set(), []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        v = _parse_variant(item)
+        if not v or v["status"] != "candidate":
+            continue
+        if domain and v["domain"] and v["domain"] != domain:
+            continue
+        if v["variant_id"] in seen:
+            continue
+        seen.add(v["variant_id"])
+        uniq.append(v)
+    return uniq
+
+
+def candidate_count(domain: Optional[str] = None) -> int:
+    try:
+        return len(list_candidates(domain))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def promote_candidate(domain: str, variant_id: str) -> Dict[str, Any]:
+    """DELIBERATE promotion: make a specific candidate the active variant (archiving the
+    current active). This is the human-in-the-loop step — never called automatically — so
+    the shared brain only changes when someone reviews and chooses to promote."""
+    if not _enabled():
+        return {"ok": False, "error": "prompt evolver disabled"}
+    if not domain or not variant_id:
+        return {"ok": False, "error": "domain and variant_id required"}
+    cand = next((c for c in list_candidates(domain) if c["variant_id"] == variant_id), None)
+    if not cand:
+        return {"ok": False, "error": f"candidate {variant_id} not found for domain {domain}"}
+    # Archive the current active (if any), preserving its variant_id/history.
+    active = _search_prompts(domain, status_filter="active", limit=1)
+    if active:
+        av = _parse_variant(active[0]) or {}
+        if av.get("variant_id"):
+            _record_prompt_variant(domain, av.get("text", ""), status="archived", variant_id=av["variant_id"])
+    # Promote the chosen candidate to active.
+    _record_prompt_variant(domain, cand["text"], status="active", variant_id=variant_id)
+    with _CACHE_LOCK:
+        _CACHE.pop(domain, None)
+    with _SEED_LOCK:
+        _SEEDED.pop(domain, None)
+    logger.warning("hermes.evolver.PROMOTED domain=%s variant=%s (deliberate review)", domain, variant_id)
+    return {"ok": True, "domain": domain, "variant_id": variant_id, "text": cand["text"]}
+
+
 def record_outcome(domain: str, variant_id: str, success: bool) -> None:
     """Called from the reflector when a turn completes with a known active variant.
 

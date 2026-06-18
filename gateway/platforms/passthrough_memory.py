@@ -461,7 +461,7 @@ def maybe_track_goal(session_key: str, provider, user_text: str, assistant_text:
 # deliberate, so nothing unproven is ever auto-applied to this shared brain.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_EVOLVER_CACHE: Dict[str, Any] = {}        # session_key -> (ts, prompt_str, domain)
+_EVOLVER_CACHE: Dict[str, Any] = {}        # session_key -> (ts, prompt_str, domain, candidate_count)
 _EVOLVER_TTL = 120.0
 
 
@@ -483,7 +483,7 @@ def evolved_prompt_block(session_key: str, session_id: str = "", *, platform: st
     except Exception:  # noqa: BLE001
         return ""
     now = time.time()
-    ts, prompt, _dom = _EVOLVER_CACHE.get(session_key, (0.0, "", ""))
+    ts, prompt, _dom, _cands = _EVOLVER_CACHE.get(session_key, (0.0, "", "", 0))
     if now - ts > _EVOLVER_TTL:
         def _refresh() -> None:
             try:
@@ -491,7 +491,8 @@ def evolved_prompt_block(session_key: str, session_id: str = "", *, platform: st
                 dom = _evolver_domain(session_key)
                 _ev2.ensure_seed(dom)                 # bootstrap a baseline so outcomes have a target
                 p = _ev2.current_prompt(dom) or ""
-                _EVOLVER_CACHE[session_key] = (time.time(), p, dom)
+                cands = _ev2.candidate_count(dom)     # proposals awaiting review
+                _EVOLVER_CACHE[session_key] = (time.time(), p, dom, cands)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("passthrough_memory evolver refresh failed: %s", exc)
         threading.Thread(target=_refresh, name="evolver-refresh", daemon=True).start()
@@ -499,8 +500,8 @@ def evolved_prompt_block(session_key: str, session_id: str = "", *, platform: st
 
 
 def evolver_summary(session_key: str) -> str:
-    _ts, prompt, dom = _EVOLVER_CACHE.get(session_key, (0.0, "", ""))
-    return "domain=%s applied=%d" % (dom or "?", 1 if prompt else 0)
+    _ts, prompt, dom, cands = _EVOLVER_CACHE.get(session_key, (0.0, "", "", 0))
+    return "domain=%s applied=%d candidates=%d" % (dom or "?", 1 if prompt else 0, cands or 0)
 
 
 class SSEContentAccumulator:

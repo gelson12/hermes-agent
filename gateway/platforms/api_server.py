@@ -988,6 +988,48 @@ class APIServerAdapter(BasePlatformAdapter):
             },
         })
 
+    async def _handle_evolver_candidates(self, request: "web.Request") -> "web.Response":
+        """GET /v1/evolver/candidates[?domain=…] — REVIEW readout: the prompt addenda the
+        evolver has PROPOSED (status=candidate) but never auto-applied, plus the active
+        addendum for contrast. Read-only; auth-gated. Promotion is a separate deliberate
+        POST so the shared brain only changes when a human reviews + chooses."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            from agent import prompt_evolver as _ev
+            domain = (request.query.get("domain") or "").strip() or None
+            cands = _ev.list_candidates(domain)
+            active = _ev.current_prompt(domain) if domain else ""
+            return web.json_response({
+                "enabled": _ev._enabled(),
+                "domain": domain,
+                "active_addendum": active,
+                "candidates": cands,
+                "note": "POST /v1/evolver/promote {domain, variant_id} to apply one (deliberate).",
+            })
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": {"message": str(exc), "type": "server_error"}}, status=500)
+
+    async def _handle_evolver_promote(self, request: "web.Request") -> "web.Response":
+        """POST /v1/evolver/promote {"domain": …, "variant_id": …} — deliberately promote a
+        reviewed candidate to active (archives the current active). Auth-gated. This is the
+        ONLY path that changes the shared brain's evolved prompt; it is never automatic."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        try:
+            from agent import prompt_evolver as _ev
+            res = _ev.promote_candidate(str(body.get("domain", "")).strip(),
+                                        str(body.get("variant_id", "")).strip())
+            return web.json_response(res, status=200 if res.get("ok") else 400)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": {"message": str(exc), "type": "server_error"}}, status=500)
+
     async def _handle_admin_model(self, request: "web.Request") -> "web.Response":
         """POST /admin/model {"provider": "gemini|anthropic|deepseek", "model"?: "..."} —
         hot-swap the live LLM provider+model with NO restart. Sets HERMES_INFERENCE_PROVIDER
@@ -3935,6 +3977,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/admin/model", self._handle_admin_model)
+            self._app.router.add_get("/v1/evolver/candidates", self._handle_evolver_candidates)
+            self._app.router.add_post("/v1/evolver/promote", self._handle_evolver_promote)
             self._app.router.add_get("/t", self._handle_track)
             self._app.router.add_get("/engagements", self._handle_engagements)
             self._app.router.add_post("/v1/responses", self._handle_responses)

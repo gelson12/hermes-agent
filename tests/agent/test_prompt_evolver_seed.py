@@ -71,6 +71,42 @@ def test_record_outcome_self_drives_propose(monkeypatch):
     assert proposals == ["d"]
 
 
+def test_list_and_promote_candidate(monkeypatch):
+    _reset()
+    monkeypatch.setenv("HERMES_PROMPT_EVOLVER_ENABLED", "true")
+    cand = {"content": "PROMPT_VARIANT [c7] domain=d status=candidate samples=40 rate=0.300\n\n"
+                       "When unsure, ask one clarifying question before answering.",
+            "metadata": {"variant_id": "c7", "status": "candidate", "domain": "d",
+                         "samples": 40, "success_rate": 0.3}}
+    active = {"content": "PROMPT_VARIANT [a1] domain=d status=active\n\nBe concise.",
+              "metadata": {"variant_id": "a1", "status": "active", "domain": "d"}}
+
+    def _search(domain, status_filter=None, limit=20):
+        if status_filter == "candidate":
+            return [cand]
+        if status_filter == "active":
+            return [active]
+        return [cand, active]
+    monkeypatch.setattr(ev, "_search_prompts", _search)
+    # list shows only the candidate
+    lst = ev.list_candidates("d")
+    assert len(lst) == 1 and lst[0]["variant_id"] == "c7"
+    assert "clarifying question" in lst[0]["text"]
+    assert ev.candidate_count("d") == 1
+
+    writes = []
+    monkeypatch.setattr(ev, "_record_prompt_variant",
+                        lambda domain, text, **k: writes.append((k.get("status"), k.get("variant_id"), text)) or k.get("variant_id"))
+    res = ev.promote_candidate("d", "c7")
+    assert res["ok"] is True and res["variant_id"] == "c7"
+    # archived the old active, promoted the candidate to active
+    statuses = {(s, vid) for (s, vid, _t) in writes}
+    assert ("archived", "a1") in statuses
+    assert ("active", "c7") in statuses
+    # unknown candidate → graceful error
+    assert ev.promote_candidate("d", "nope")["ok"] is False
+
+
 def test_disabled_is_inert(monkeypatch):
     _reset()
     monkeypatch.setenv("HERMES_PROMPT_EVOLVER_ENABLED", "false")
